@@ -8,10 +8,10 @@ use crate::options::SampleRate;
 /// backend-agnostic detection logic — [`SpeechSegmenter`], the
 /// [`detect_speech_with`] one-shot helper — drives a backend through
 /// this trait and never touches the underlying model, so the same
-/// segmentation semantics work over the bundled ONNX backend
-/// (`Session`, behind the default `onnx` feature) or any other
-/// implementation (e.g. a CoreML backend declaring a different frame
-/// geometry).
+/// segmentation semantics work over any backend implementation: an ONNX
+/// Silero backend declaring the 512-sample / 16 kHz frame geometry, a
+/// CoreML backend declaring a different frame geometry, or a purely
+/// synthetic one.
 ///
 /// # Geometry
 ///
@@ -19,10 +19,11 @@ use crate::options::SampleRate;
 /// samples make up one frame; the detector advances its timeline by
 /// exactly that many samples per probability and chunks incoming PCM
 /// accordingly. It is decoupled from
-/// [`SampleRate::chunk_samples`] on purpose: the ONNX backend declares
-/// `512` at 16 kHz (identical to `chunk_samples`), while a backend built
-/// around a different artifact can declare any positive frame size (for
-/// example `4096`) and reuse the same detector unchanged.
+/// [`SampleRate::chunk_samples`] on purpose: a Silero-geometry backend
+/// declares `512` at 16 kHz (identical to `chunk_samples`), while a
+/// backend built around a different artifact can declare any positive
+/// frame size (for example `4096`) and reuse the same detector
+/// unchanged.
 ///
 /// [`SpeechSegmenter`]: crate::SpeechSegmenter
 /// [`detect_speech_with`]: crate::detect_speech_with
@@ -30,10 +31,11 @@ pub trait VadBackend {
   /// The backend's own error type, bridged into [`crate::Error`].
   ///
   /// The detector converts a backend error into [`crate::Error`] via
-  /// this bound. In-crate backends set this to [`crate::Error`] itself
-  /// (an identity conversion); out-of-tree backends define their own
-  /// error and provide `impl From<TheirError> for silero::Error`,
-  /// wrapping it in the transparent [`crate::Error::Backend`] variant.
+  /// this bound. A backend either sets this to [`crate::Error`] itself
+  /// (constructing [`crate::Error`] values directly — an identity
+  /// conversion) or defines its own error type and provides
+  /// `impl From<TheirError> for crate::Error`, wrapping it in the
+  /// transparent [`crate::Error::Backend`] variant.
   type Error: Into<crate::Error>;
 
   /// The number of PCM samples in one model frame.

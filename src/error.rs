@@ -1,33 +1,13 @@
-#[cfg(feature = "onnx")]
-use std::path::PathBuf;
-
-/// Errors that can occur during Silero VAD operations.
+/// Errors that can occur during VAD operations.
 ///
-/// Marked `#[non_exhaustive]` because the set of variants depends on
-/// enabled features (the ORT-typed variants require the default `onnx`
-/// feature) and grows as new backends bridge their errors through
-/// [`Error::Backend`]; downstream `match`es must include a `_` arm.
+/// Marked `#[non_exhaustive]` because the set of variants grows as new
+/// backends bridge their errors through [`Error::Backend`], and consumer
+/// crates layer their own typed variants on top (for example an ONNX
+/// model backend adds ORT-typed model-load / inference variants);
+/// downstream `match`es must include a `_` arm.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-  /// Errors related to loading the ONNX model, including file I/O and ONNX runtime errors.
-  #[cfg(feature = "onnx")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "onnx")))]
-  #[error("failed to load Silero model from {path}: {source}")]
-  LoadModel {
-    /// The path that was attempted to be loaded (for context in the error message).
-    path: PathBuf,
-    /// The underlying error from the ONNX runtime or file I/O.
-    #[source]
-    source: ort::Error,
-  },
-
-  /// Errors related to invalid input data, such as mismatched sample rates or chunk sizes.
-  #[cfg(feature = "onnx")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "onnx")))]
-  #[error(transparent)]
-  Ort(#[from] ort::Error),
-
   /// An error raised by a [`VadBackend`] implementation.
   ///
   /// The transparent bridge for the [`VadBackend::Error`] associated
@@ -43,9 +23,7 @@ pub enum Error {
   Backend(Box<dyn std::error::Error + Send + Sync + 'static>),
 
   /// Errors related to unsupported or incompatible sample rates.
-  #[error(
-    "unsupported sample rate: {rate} Hz (Silero VAD only supports 8 kHz and 16 kHz directly)"
-  )]
+  #[error("unsupported sample rate: {rate} Hz (only 8 kHz and 16 kHz are supported directly)")]
   UnsupportedSampleRate {
     /// The unsupported sample rate in Hz.
     rate: u32,
@@ -72,7 +50,7 @@ pub enum Error {
   },
 
   /// Errors related to invalid chunk lengths that do not match the expected chunk size for the sample rate.
-  #[error("invalid Silero chunk length: expected {expected} samples, got {actual}")]
+  #[error("invalid VAD chunk length: expected {expected} samples, got {actual}")]
   InvalidChunkLength {
     /// The expected chunk length in samples for the given sample rate.
     expected: usize,
@@ -81,7 +59,7 @@ pub enum Error {
   },
 
   /// Errors related to unexpected output shapes from the model during inference.
-  #[error("Silero model returned unexpected shape for {tensor}: {shape:?}")]
+  #[error("VAD model returned unexpected shape for {tensor}: {shape:?}")]
   UnexpectedOutputShape {
     /// The name of the tensor that had an unexpected shape.
     tensor: &'static str,
@@ -90,5 +68,5 @@ pub enum Error {
   },
 }
 
-/// A convenient alias for results returned by Silero VAD operations, using the custom `Error` type defined above.
+/// A convenient alias for results returned by VAD operations, using the custom `Error` type defined above.
 pub type Result<T> = std::result::Result<T, Error>;
