@@ -17,9 +17,10 @@ Backend-agnostic voice-activity-detection (VAD) core.
 
 `zuoer` is the model-free heart of a VAD pipeline. It provides:
 
-- the **`VadBackend` seam** — the minimal per-frame contract (`frame_samples`,
-  `sample_rate`, `predict`, `reset`, and an associated `Error`) that turns one
-  exact-size frame of PCM into a single speech probability;
+- the **`VadBackend` seam** — the push-based contract (`frame_hop`,
+  `sample_rate`, `push`, `finish`, `reset`, and an associated `Error`) that
+  feeds PCM to a backend and emits speech probabilities through a `sink`, one
+  per completed model frame;
 - the **backend-agnostic post-processing** that turns a stream of those
   probabilities into speech segments: the `SpeechSegmenter` hysteresis state
   machine, its `SpeechOptions` timing/threshold configuration, `SpeechSegment`,
@@ -30,7 +31,7 @@ implements `VadBackend` over its own inference — an ONNX Silero backend, a
 CoreML backend, or any other — and drives the segmenter with this crate's
 post-processing. The segmentation rules are the Silero-VAD-derived hysteresis
 semantics; a backend that declares a different frame geometry (via
-`VadBackend::frame_samples`) reuses them unchanged.
+`VadBackend::frame_hop`) reuses them unchanged.
 
 ## Usage
 
@@ -39,17 +40,33 @@ Implement `VadBackend` over your model, then run it one-shot or streaming:
 ```rust
 use zuoer::{SampleRate, SpeechOptions, VadBackend, detect_speech_with};
 
-struct MyBackend { /* model + recurrent state */ }
+struct MyBackend { /* model + recurrent state + partial-frame buffer */ }
 
 impl VadBackend for MyBackend {
     type Error = zuoer::Error;
-    fn frame_samples(&self) -> usize { 512 }
+
+    // Samples one emitted probability advances the timeline (the frame hop).
+    fn frame_hop(&self) -> usize { 512 }
+
     fn sample_rate(&self) -> SampleRate { SampleRate::Rate16k }
-    fn predict(&mut self, frame: &[f32]) -> Result<f32, Self::Error> {
-        // run inference over exactly `frame_samples()` samples
-        Ok(0.0)
+
+    // Feed PCM; invoke `sink` once per completed model frame. A call may
+    // emit zero, one, or many probabilities — buffer the trailing partial
+    // frame for the next call.
+    fn push(&mut self, samples: &[f32], sink: &mut dyn FnMut(f32)) -> Result<(), Self::Error> {
+        let _ = (samples, sink); // run inference over each complete window
+        Ok(())
     }
-    fn reset(&mut self) { /* clear recurrent state */ }
+
+    // End-of-stream: emit any trailing probability your policy produces —
+    // zero-pad the last partial frame, or drop it (snip_edges) and emit
+    // nothing.
+    fn finish(&mut self, sink: &mut dyn FnMut(f32)) -> Result<(), Self::Error> {
+        let _ = sink;
+        Ok(())
+    }
+
+    fn reset(&mut self) { /* clear recurrent state + partial-frame buffer */ }
 }
 
 let mut backend = MyBackend { /* .. */ };

@@ -14,8 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial release. The backend-agnostic VAD core extracted from the
   [`silero`](https://github.com/Findit-AI/silero) crate (0.5.0), with full
   git history preserved:
-  - `VadBackend` — the per-frame backend seam (`frame_samples`,
-    `sample_rate`, `predict`, `reset`, associated `Error`).
+  - `VadBackend` — the push-based backend seam (`frame_hop`,
+    `sample_rate`, `push`, `finish`, `reset`, associated `Error`): the
+    backend owns its input windowing (overlapping windows and delayed
+    first output are expressible) and its end-of-stream trailing-frame
+    policy (zero-pad or drop), emitting probabilities through a `sink`.
   - `SpeechSegmenter` / `SpeechDetector` — the Silero-VAD-derived hysteresis
     state machine that turns frame probabilities into `SpeechSegment`s, with
     the `push_probabilities` / `pop_pending` streaming seam.

@@ -70,20 +70,20 @@ impl SpeechSegment {
 /// single-stream inference and micro-batched inference while still
 /// reusing the same segment semantics.
 ///
-/// Its timeline advances by [`frame_samples`](Self::frame_samples) per
+/// Its timeline advances by [`frame_hop`](Self::frame_hop) per
 /// probability. That defaults to the sample rate's model chunk size
 /// (512 samples at 16 kHz — the ONNX geometry), but a backend that
-/// declares a different frame size drives it through
-/// [`set_frame_samples`](Self::set_frame_samples) (done automatically by
+/// declares a different hop drives it through
+/// [`set_frame_hop`](Self::set_frame_hop) (done automatically by
 /// [`detect_speech_with`]) so the same segmentation rules apply at any
 /// frame geometry.
 #[derive(Debug, Clone)]
 pub struct SpeechSegmenter {
   options: SpeechOptions,
-  // Samples per model frame; the timeline advances by this per
-  // probability. Defaults to `sample_rate().chunk_samples()`; a
-  // non-ONNX backend overrides it via `set_frame_samples`.
-  frame_samples: u64,
+  // Frame hop: the timeline advances by this many samples per
+  // probability. Defaults to `sample_rate().chunk_samples()`; a backend
+  // with a different hop overrides it via `set_frame_hop`.
+  frame_hop: u64,
   current_sample: u64,
   // Padded start sample used for emitted segments.
   active_start: Option<u64>,
@@ -105,16 +105,16 @@ pub struct SpeechSegmenter {
 impl SpeechSegmenter {
   /// Create a new `SpeechSegmenter` with the given options.
   ///
-  /// The frame geometry defaults to the options' sample-rate model chunk
+  /// The frame hop defaults to the options' sample-rate model chunk
   /// size (512 samples at 16 kHz). Override it with
-  /// [`set_frame_samples`](Self::set_frame_samples) for a backend that
-  /// declares a different frame size.
+  /// [`set_frame_hop`](Self::set_frame_hop) for a backend that declares a
+  /// different hop.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn new(options: SpeechOptions) -> Self {
-    let frame_samples = options.sample_rate().chunk_samples() as u64;
+    let frame_hop = options.sample_rate().chunk_samples() as u64;
     Self {
       options,
-      frame_samples,
+      frame_hop,
       current_sample: 0,
       active_start: None,
       active_raw_start: None,
@@ -139,9 +139,9 @@ impl SpeechSegmenter {
   pub fn set_sample_rate(&mut self, sample_rate: SampleRate) {
     if self.sample_rate() != sample_rate {
       self.options.set_sample_rate(sample_rate);
-      // A new rate implies a new default frame geometry; a custom
-      // backend frame size must be re-applied via `set_frame_samples`.
-      self.frame_samples = sample_rate.chunk_samples() as u64;
+      // A new rate implies a new default hop; a custom backend hop must
+      // be re-applied via `set_frame_hop`.
+      self.frame_hop = sample_rate.chunk_samples() as u64;
       self.reset();
     }
   }
@@ -152,34 +152,34 @@ impl SpeechSegmenter {
     self.options.sample_rate()
   }
 
-  /// Returns the number of samples per model frame that this segmenter's
+  /// Returns the frame hop: the number of samples this segmenter's
   /// timeline advances by per probability.
   #[cfg_attr(not(tarpaulin), inline(always))]
-  pub const fn frame_samples(&self) -> usize {
-    self.frame_samples as usize
+  pub const fn frame_hop(&self) -> usize {
+    self.frame_hop as usize
   }
 
-  /// Set the number of samples per model frame.
+  /// Set the frame hop.
   ///
-  /// The segmenter advances its sample timeline by `frame_samples` for
-  /// each probability fed to [`push_probability`](Self::push_probability),
-  /// so this must equal the frame size of the backend producing those
-  /// probabilities — the value a [`VadBackend`] reports from
-  /// [`frame_samples`](VadBackend::frame_samples). [`detect_speech_with`]
-  /// applies it automatically; call it directly only when driving
+  /// The segmenter advances its sample timeline by `frame_hop` for each
+  /// probability fed to [`push_probability`](Self::push_probability), so
+  /// this must equal the hop of the backend producing those probabilities
+  /// — the value a [`VadBackend`] reports from
+  /// [`frame_hop`](VadBackend::frame_hop). [`detect_speech_with`] applies
+  /// it automatically; call it directly only when driving
   /// [`push_probability`](Self::push_probability) with a custom backend
-  /// whose frame size differs from the sample rate's model chunk size.
+  /// whose hop differs from the sample rate's model chunk size.
   ///
-  /// [`set_sample_rate`](Self::set_sample_rate) resets the frame size to
-  /// the rate's model chunk size, so apply this after any rate change.
+  /// [`set_sample_rate`](Self::set_sample_rate) resets the hop to the
+  /// rate's model chunk size, so apply this after any rate change.
   ///
   /// # Panics
   ///
-  /// Panics if `frame_samples` is zero.
+  /// Panics if `frame_hop` is zero.
   #[cfg_attr(not(tarpaulin), inline(always))]
-  pub fn set_frame_samples(&mut self, frame_samples: usize) {
-    assert!(frame_samples != 0, "frame_samples must be non-zero");
-    self.frame_samples = frame_samples as u64;
+  pub fn set_frame_hop(&mut self, frame_hop: usize) {
+    assert!(frame_hop != 0, "frame_hop must be non-zero");
+    self.frame_hop = frame_hop as u64;
   }
 
   /// Returns whether the segmenter is currently active (i.e., has an ongoing speech segment).
@@ -231,9 +231,9 @@ impl SpeechSegmenter {
   /// driver needs — use [`push_probabilities`](Self::push_probabilities)
   /// followed by [`pop_pending`](Self::pop_pending).
   pub fn push_probability(&mut self, probability: f32) -> Option<SpeechSegment> {
-    let frame_samples = self.frame_samples;
+    let frame_hop = self.frame_hop;
     let frame_start = self.current_sample;
-    self.current_sample = self.current_sample.saturating_add(frame_samples);
+    self.current_sample = self.current_sample.saturating_add(frame_hop);
 
     if probability >= self.options.start_threshold() {
       if let Some(tentative_end) = self.tentative_end.take() {
@@ -252,9 +252,7 @@ impl SpeechSegmenter {
 
     let start = self.active_start?;
     let raw_start = self.active_raw_start?;
-    if let Some(max_speech_samples) = self
-      .options
-      .max_speech_samples_for_frame(self.frame_samples)
+    if let Some(max_speech_samples) = self.options.max_speech_samples_for_frame(self.frame_hop)
       && frame_start.saturating_sub(raw_start) > max_speech_samples
     {
       return self.split_at_max_duration(frame_start, probability);
@@ -411,13 +409,14 @@ pub type SpeechDetector = SpeechSegmenter;
 
 /// One-shot offline speech detection over any [`VadBackend`].
 ///
-/// Chunks `samples` into
-/// [`frame_samples`](VadBackend::frame_samples)-sized frames, runs the
-/// backend once per frame, and applies the same segmentation rules as
-/// [`SpeechSegmenter`]. A trailing partial frame is zero-padded and
-/// flushed to match a streaming backend's end-of-stream behavior. The
-/// backend is *not* [`reset`](VadBackend::reset): pass a freshly
-/// constructed or reset backend to start a new stream.
+/// Feeds the whole `samples` buffer to the backend via
+/// [`push`](VadBackend::push), then [`finish`](VadBackend::finish), and
+/// applies the same segmentation rules as [`SpeechSegmenter`] to every
+/// probability the backend emits. Input windowing and the end-of-stream
+/// trailing-frame policy (zero-pad the last partial frame, or drop it) are
+/// the backend's own — this helper imposes neither. The backend is *not*
+/// [`reset`](VadBackend::reset): pass a freshly constructed or reset
+/// backend to start a new stream.
 ///
 /// # Sample rate
 ///
@@ -430,50 +429,48 @@ pub type SpeechDetector = SpeechSegmenter;
 /// # Errors
 ///
 /// Returns the backend's error, bridged into [`Error`](crate::Error), if
-/// any frame's inference fails.
+/// any inference fails.
 ///
 /// # Panics
 ///
 /// Panics if the backend reports a zero
-/// [`frame_samples`](VadBackend::frame_samples).
+/// [`frame_hop`](VadBackend::frame_hop).
 pub fn detect_speech_with<B: VadBackend>(
   backend: &mut B,
   samples: &[f32],
   options: SpeechOptions,
 ) -> Result<Vec<SpeechSegment>> {
-  let frame = backend.frame_samples();
-  assert!(frame != 0, "VadBackend::frame_samples() must be non-zero");
+  let hop = backend.frame_hop();
+  assert!(hop != 0, "VadBackend::frame_hop() must be non-zero");
   let mut segmenter = SpeechSegmenter::new(options);
   // The backend owns its stream's sample rate: align the segmenter's
   // duration conversions and segment stamps to it, overriding the rate
-  // the passed options carried. `set_sample_rate` also resets the frame
-  // geometry to that rate's model chunk, so re-apply the backend's frame
-  // size afterward.
+  // the passed options carried. `set_sample_rate` also resets the hop to
+  // that rate's model chunk, so re-apply the backend's hop afterward.
   segmenter.set_sample_rate(backend.sample_rate());
-  segmenter.set_frame_samples(frame);
+  segmenter.set_frame_hop(hop);
   let mut segments = Vec::new();
 
-  let mut offset = 0;
-  while offset + frame <= samples.len() {
-    let probability = backend
-      .predict(&samples[offset..offset + frame])
-      .map_err(Into::into)?;
-    if let Some(segment) = segmenter.push_probability(probability) {
-      segments.push(segment);
-    }
-    offset += frame;
-  }
-
-  // Zero-pad and flush the trailing partial frame, mirroring a
-  // streaming backend's end-of-stream flush.
-  if offset < samples.len() {
-    let mut tail = vec![0.0; frame];
-    tail[..samples.len() - offset].copy_from_slice(&samples[offset..]);
-    let probability = backend.predict(&tail).map_err(Into::into)?;
-    if let Some(segment) = segmenter.push_probability(probability) {
-      segments.push(segment);
-    }
-  }
+  // The backend owns input windowing and its end-of-stream policy; drive
+  // `push` then `finish`, segmenting each emitted probability through the
+  // sink. The sink form keeps a streaming backend's hot path
+  // allocation-free — no intermediate probability buffer. The two inline
+  // closures are separate so each releases its borrow of `segmenter` /
+  // `segments` before the trailing `segmenter.finish()`.
+  backend
+    .push(samples, &mut |probability| {
+      if let Some(segment) = segmenter.push_probability(probability) {
+        segments.push(segment);
+      }
+    })
+    .map_err(Into::into)?;
+  backend
+    .finish(&mut |probability| {
+      if let Some(segment) = segmenter.push_probability(probability) {
+        segments.push(segment);
+      }
+    })
+    .map_err(Into::into)?;
 
   if let Some(segment) = segmenter.finish() {
     segments.push(segment);
@@ -873,72 +870,133 @@ mod tests {
     }
   }
 
-  /// A `VadBackend` that returns canned probabilities — one per frame —
-  /// at a caller-declared frame geometry. It authors no detection logic;
-  /// it exists to drive the segmenter's frame math and the error bridge
-  /// without ORT.
+  /// End-of-stream policy for [`MockBackend`]: whether an incomplete
+  /// trailing window is zero-padded into a final probability (Silero) or
+  /// dropped (FireRed's `snip_edges=true`).
+  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  enum EofPolicy {
+    Pad,
+    Snip,
+  }
+
+  /// A push-based `VadBackend` that returns canned probabilities — one per
+  /// completed analysis window — at a caller-declared window/hop geometry.
+  /// It authors no detection logic; it exists to drive the segmenter's hop
+  /// math, the emit-zero/one/many contract, the end-of-stream policy, and
+  /// the error bridge without ORT.
+  ///
+  /// `window` samples make one analysis window; after emitting a window the
+  /// head advances by `hop`. `window > hop` means overlapping windows
+  /// (FireRed geometry); `window == hop` means disjoint frames (Silero
+  /// geometry). PCM shorter than one window is buffered in `tail` until a
+  /// later `push` completes it, or handled by `finish` per [`EofPolicy`].
   struct MockBackend {
-    frame_samples: usize,
+    window: usize,
+    hop: usize,
     sample_rate: SampleRate,
+    eof: EofPolicy,
+    tail: Vec<f32>,
     probabilities: Vec<f32>,
+    // Index of the next canned probability; also the running count of
+    // windows emitted, which the FireRed-geometry proofs assert against.
     cursor: usize,
     fail_at: Option<usize>,
   }
 
   impl MockBackend {
-    fn new(frame_samples: usize, probabilities: Vec<f32>) -> Self {
+    fn new(window: usize, hop: usize, eof: EofPolicy, probabilities: Vec<f32>) -> Self {
+      assert!(window != 0 && hop != 0 && window >= hop);
       Self {
-        frame_samples,
+        window,
+        hop,
         sample_rate: SampleRate::Rate16k,
+        eof,
+        tail: Vec::new(),
         probabilities,
         cursor: 0,
         fail_at: None,
       }
     }
 
+    /// Silero-style geometry: window == hop == `frame`, zero-padding the
+    /// trailing partial frame at end-of-stream.
+    fn silero_like(frame: usize, probabilities: Vec<f32>) -> Self {
+      Self::new(frame, frame, EofPolicy::Pad, probabilities)
+    }
+
     fn with_sample_rate(mut self, sample_rate: SampleRate) -> Self {
       self.sample_rate = sample_rate;
       self
+    }
+
+    fn with_fail_at(mut self, cursor: usize) -> Self {
+      self.fail_at = Some(cursor);
+      self
+    }
+
+    /// Emit the next canned probability (`0.0` past the end) via `sink`,
+    /// failing if this window index was marked. Advances `cursor`.
+    fn emit(&mut self, sink: &mut dyn FnMut(f32)) -> Result<(), MockError> {
+      if self.fail_at == Some(self.cursor) {
+        return Err(MockError("mock predict failure"));
+      }
+      let probability = self.probabilities.get(self.cursor).copied().unwrap_or(0.0);
+      self.cursor += 1;
+      sink(probability);
+      Ok(())
     }
   }
 
   impl VadBackend for MockBackend {
     type Error = MockError;
 
-    fn frame_samples(&self) -> usize {
-      self.frame_samples
+    fn frame_hop(&self) -> usize {
+      self.hop
     }
 
     fn sample_rate(&self) -> SampleRate {
       self.sample_rate
     }
 
-    fn predict(&mut self, frame: &[f32]) -> Result<f32, MockError> {
-      assert_eq!(
-        frame.len(),
-        self.frame_samples,
-        "backend must be handed exactly frame_samples per frame"
-      );
-      if self.fail_at == Some(self.cursor) {
-        return Err(MockError("mock predict failure"));
+    fn push(&mut self, samples: &[f32], sink: &mut dyn FnMut(f32)) -> Result<(), MockError> {
+      self.tail.extend_from_slice(samples);
+      // Emit one probability per complete window, advancing the head by
+      // `hop` (not `window`) so overlapping windows are honored.
+      while self.tail.len() >= self.window {
+        self.emit(sink)?;
+        self.tail.drain(..self.hop);
       }
-      let probability = self.probabilities.get(self.cursor).copied().unwrap_or(0.0);
-      self.cursor += 1;
-      Ok(probability)
+      Ok(())
+    }
+
+    fn finish(&mut self, sink: &mut dyn FnMut(f32)) -> Result<(), MockError> {
+      match self.eof {
+        // Silero policy: zero-pad the trailing partial window into one
+        // final probability.
+        EofPolicy::Pad if !self.tail.is_empty() => {
+          self.tail.resize(self.window, 0.0);
+          self.emit(sink)?;
+          self.tail.clear();
+        }
+        // FireRed's snip_edges=true: drop the incomplete trailing window.
+        _ => self.tail.clear(),
+      }
+      Ok(())
     }
 
     fn reset(&mut self) {
+      self.tail.clear();
       self.cursor = 0;
     }
   }
 
   #[test]
-  fn set_frame_samples_overrides_the_sample_rate_default() {
+  fn set_frame_hop_overrides_the_sample_rate_default() {
     let mut segmenter = SpeechSegmenter::new(SpeechOptions::default());
-    // The 16 kHz model chunk is the default frame geometry.
-    assert_eq!(segmenter.frame_samples(), 512);
-    segmenter.set_frame_samples(4096);
-    assert_eq!(segmenter.frame_samples(), 4096);
+    // The 16 kHz model chunk is the default hop.
+    assert_eq!(segmenter.frame_hop(), 512);
+    segmenter.set_frame_hop(4096);
+    assert_eq!(segmenter.frame_hop(), 4096);
   }
 
   #[test]
@@ -953,7 +1011,8 @@ mod tests {
     // 4_000 samples, dropped the 2_560-sample run, and would have stamped
     // any segment 16 kHz. Mutation: drop the `set_sample_rate` derivation
     // in `detect_speech_with` → zero segments (and a 16 kHz stamp) → red.
-    let mut backend = MockBackend::new(256, vec![0.9; 10]).with_sample_rate(SampleRate::Rate8k);
+    let mut backend =
+      MockBackend::silero_like(256, vec![0.9; 10]).with_sample_rate(SampleRate::Rate8k);
     let samples = vec![0.0_f32; 10 * 256];
     let segments =
       detect_speech_with(&mut backend, &samples, SpeechOptions::default()).expect("detect");
@@ -971,16 +1030,16 @@ mod tests {
 
   #[test]
   fn mock_geometry_closes_after_two_256ms_low_frames() {
-    // A backend declaring 4096-sample frames makes each frame 256 ms at
-    // 16 kHz. The default `min_silence_duration_ms = 100` is 1600
-    // samples. Because the silence counter is measured BEFORE the
+    // A backend declaring 4096-sample frames (window == hop) makes each
+    // frame 256 ms at 16 kHz. The default `min_silence_duration_ms = 100`
+    // is 1600 samples. Because the silence counter is measured BEFORE the
     // current frame is consumed, the FIRST low frame only establishes
     // the silence start (counter 0) and the SECOND low frame sees a full
     // 4096-sample (256 ms) gap — which already exceeds 1600 — so the
     // segment closes on the second low frame. This is the above-the-
-    // threshold side of the duration→frame rounding, and every boundary
+    // threshold side of the duration→hop rounding, and every boundary
     // lands on a 4096-sample multiple.
-    let mut backend = MockBackend::new(4096, vec![0.9, 0.9, 0.9, 0.0, 0.0]);
+    let mut backend = MockBackend::silero_like(4096, vec![0.9, 0.9, 0.9, 0.0, 0.0]);
     let samples = vec![0.0_f32; 5 * 4096];
     let segments =
       detect_speech_with(&mut backend, &samples, SpeechOptions::default()).expect("detect");
@@ -993,7 +1052,7 @@ mod tests {
     assert_eq!(segments[0].start_sample(), 0);
     // raw_end = 3 * 4096 (silence start), + 30 ms speech_pad (480).
     assert_eq!(segments[0].end_sample(), 3 * 4096 + 480);
-    // Every frame handed to the backend was consumed at 4096 samples.
+    // Every window handed to the backend was consumed at 4096 samples.
     assert_eq!(backend.cursor, 5);
   }
 
@@ -1004,9 +1063,9 @@ mod tests {
     // closes mid-stream. The open segment is emitted by the end-of-
     // stream `finish`, spanning to the raw current sample — a 4096-
     // sample multiple with no trailing pad. Hardcoding a 512-sample
-    // frame here would advance the timeline too slowly to satisfy the
+    // hop here would advance the timeline too slowly to satisfy the
     // 250 ms (4000-sample) minimum-speech gate and drop the segment.
-    let mut backend = MockBackend::new(4096, vec![0.9, 0.9, 0.9, 0.0]);
+    let mut backend = MockBackend::silero_like(4096, vec![0.9, 0.9, 0.9, 0.0]);
     let samples = vec![0.0_f32; 4 * 4096];
     let segments =
       detect_speech_with(&mut backend, &samples, SpeechOptions::default()).expect("detect");
@@ -1023,16 +1082,16 @@ mod tests {
   #[test]
   fn mock_geometry_max_speech_lookahead_is_frame_aware() {
     // Regression (backend-seam Medium): the max-speech force-split
-    // lookahead must subtract the ACTIVE frame size, not the sample rate's
+    // lookahead must subtract the ACTIVE hop, not the sample rate's
     // model chunk. A 4096-sample backend at 16 kHz with a 1 s max-speech
-    // ceiling (speech_pad 0) has a frame-aware threshold of
+    // ceiling (speech_pad 0) has a hop-aware threshold of
     // 16_000 − 4_096 = 11_904, so the first frame_start past it is 12_288
     // (768 ms) and the split lands there. The old chunk-based threshold
     // (16_000 − 512 = 15_488) split one frame later, at frame_start
     // 16_384 (1.024 s) — overshooting the configured 1 s maximum. Mutation:
     // revert the lookahead to `chunk_samples()` → the split moves to
     // 16_384 → red.
-    let mut backend = MockBackend::new(4096, vec![0.9; 6]);
+    let mut backend = MockBackend::silero_like(4096, vec![0.9; 6]);
     let samples = vec![0.0_f32; 6 * 4096];
     let options = SpeechOptions::default()
       .with_min_speech_duration(Duration::ZERO)
@@ -1044,7 +1103,7 @@ mod tests {
     assert_eq!(
       segments[0].end_sample(),
       12_288,
-      "max-speech split must land at the frame-aware 12_288, not the \
+      "max-speech split must land at the hop-aware 12_288, not the \
        chunk-based overshoot 16_384"
     );
   }
@@ -1053,14 +1112,10 @@ mod tests {
   fn mock_backend_error_bridges_through_backend_variant() {
     // The associated `VadBackend::Error` (a foreign type here) must
     // reach the caller through the transparent `Error::Backend` variant,
-    // delegating its `Display` to the wrapped error.
-    let mut backend = MockBackend {
-      frame_samples: 4096,
-      sample_rate: SampleRate::Rate16k,
-      probabilities: vec![0.9, 0.9, 0.9],
-      cursor: 0,
-      fail_at: Some(1),
-    };
+    // delegating its `Display` to the wrapped error. The failure fires on
+    // the SECOND emitted window (`fail_at: 1`) — mid-`push` — so the
+    // error propagates out of `push`, not `finish`.
+    let mut backend = MockBackend::silero_like(4096, vec![0.9, 0.9, 0.9]).with_fail_at(1);
     let samples = vec![0.0_f32; 3 * 4096];
     let error = detect_speech_with(&mut backend, &samples, SpeechOptions::default())
       .expect_err("backend failure must propagate");
@@ -1069,5 +1124,48 @@ mod tests {
       "backend error must bridge through Error::Backend, got {error:?}"
     );
     assert_eq!(error.to_string(), "mock predict failure");
+  }
+
+  // ── FireRed geometry proof: the push-based contract fits a 400-sample
+  //    window / 160-sample hop / delayed-first-output / snip_edges backend
+  //    (the fence's exact 640- and 500-sample histories). ────────────────
+
+  #[test]
+  fn firered_geometry_640_samples_emit_two_windows_through_detect_speech_with() {
+    // The push-based contract must express FireRed's feature geometry: a
+    // 400-sample analysis window advanced by a 160-sample hop, with no
+    // output until a full window exists and snip_edges=true at the tail.
+    // The fence's exact history — 640 PCM samples contain two valid
+    // windows (starting at samples 0 and 160) — so driving
+    // `detect_speech_with` must run the backend to EXACTLY two
+    // probabilities. The retired `predict` / `frame_samples` contract
+    // could not express this: one input chunk meant one hop and a
+    // mandatory trailing pad, so 640 samples forced either four
+    // probabilities at hop 160 (two before any valid window existed) or a
+    // missed window at frame 400.
+    let mut backend = MockBackend::new(400, 160, EofPolicy::Snip, vec![0.9, 0.9]);
+    let samples = vec![0.0_f32; 640];
+    let _ = detect_speech_with(&mut backend, &samples, SpeechOptions::default()).expect("detect");
+    assert_eq!(
+      backend.cursor, 2,
+      "640 samples must emit exactly two FireRed windows (at samples 0 and 160)"
+    );
+  }
+
+  #[test]
+  fn firered_geometry_500_sample_tail_is_snipped_through_detect_speech_with() {
+    // The snip_edges half of the fence history: 500 samples contain ONE
+    // full window (at sample 0); the trailing 340 samples are an
+    // incomplete window that FireRed's snip_edges=true DROPS. Driving
+    // `detect_speech_with` must run the backend to exactly ONE probability
+    // — the old detector-side zero-pad would have fabricated a second
+    // FireRed window that upstream never produces.
+    let mut backend = MockBackend::new(400, 160, EofPolicy::Snip, vec![0.9, 0.9]);
+    let samples = vec![0.0_f32; 500];
+    let _ = detect_speech_with(&mut backend, &samples, SpeechOptions::default()).expect("detect");
+    assert_eq!(
+      backend.cursor, 1,
+      "500 samples must emit exactly one window; the 340-sample tail is snipped, not padded"
+    );
   }
 }

@@ -40,15 +40,6 @@ pub enum Error {
     actual: u32,
   },
 
-  /// Errors related to batch inference containing streams with mixed sample rates.
-  #[error("batch contains mixed sample rates (expected {expected} Hz, found {actual} Hz)")]
-  MixedBatchSampleRate {
-    /// The expected sample rate in Hz for all streams in the batch (e.g., the sample rate of the first stream).
-    expected: u32,
-    /// The actual sample rate in Hz from a stream that does not match the expected sample rate.
-    actual: u32,
-  },
-
   /// Errors related to invalid chunk lengths that do not match the expected chunk size for the sample rate.
   #[error("invalid VAD chunk length: expected {expected} samples, got {actual}")]
   InvalidChunkLength {
@@ -56,15 +47,6 @@ pub enum Error {
     expected: usize,
     /// The actual chunk length in samples that was provided.
     actual: usize,
-  },
-
-  /// Errors related to unexpected output shapes from the model during inference.
-  #[error("VAD model returned unexpected shape for {tensor}: {shape:?}")]
-  UnexpectedOutputShape {
-    /// The name of the tensor that had an unexpected shape.
-    tensor: &'static str,
-    /// The actual shape of the tensor that was returned by the model.
-    shape: Vec<i64>,
   },
 }
 

@@ -29,21 +29,19 @@ impl SampleRate {
     }
   }
 
-  /// Returns the number of samples in a single model chunk for this sample rate.
+  /// Returns the number of samples in the legacy default model chunk for
+  /// this sample rate (`256` at 8 kHz, `512` at 16 kHz).
+  ///
+  /// This is the default frame hop a [`SpeechSegmenter`](crate::SpeechSegmenter)
+  /// advances by when no backend overrides it — the Silero geometry. A
+  /// backend that declares a different hop drives the segmenter through
+  /// [`VadBackend::frame_hop`](crate::VadBackend::frame_hop) instead, so
+  /// this value is only the fallback, not a fixed contract.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn chunk_samples(self) -> usize {
     match self {
       Self::Rate8k => 256,
       Self::Rate16k => 512,
-    }
-  }
-
-  /// Returns the number of context samples the model expects for this sample rate.
-  #[cfg_attr(not(tarpaulin), inline(always))]
-  pub const fn context_samples(self) -> usize {
-    match self {
-      Self::Rate8k => 32,
-      Self::Rate16k => 64,
     }
   }
 
@@ -227,35 +225,36 @@ impl SpeechOptions {
   }
 
   /// Returns the maximum speech duration before force-splitting, in
-  /// samples, for the sample rate's native model-chunk frame geometry.
+  /// samples, for the sample rate's legacy default model-chunk hop.
   ///
-  /// This assumes the bundled ONNX backend's geometry (`chunk_samples`
-  /// per frame). A backend that declares a different frame size force-
-  /// splits on that active frame size instead: the
+  /// This assumes the bundled ONNX backend's hop (`chunk_samples` per
+  /// probability). A backend that declares a different frame hop force-
+  /// splits on that active hop instead: the
   /// [`SpeechSegmenter`](crate::SpeechSegmenter) driving
-  /// [`detect_speech_with`](crate::detect_speech_with) applies its own
-  /// frame geometry automatically, so those segments honor the backend's
-  /// frame rather than this method's chunk assumption.
+  /// [`detect_speech_with`](crate::detect_speech_with) applies the
+  /// backend's [`frame_hop`](crate::VadBackend::frame_hop) automatically,
+  /// so those segments honor the backend's hop rather than this method's
+  /// chunk assumption.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn max_speech_samples(&self) -> Option<u64> {
     self.max_speech_samples_for_frame(self.sample_rate.chunk_samples() as u64)
   }
 
   /// Returns the maximum speech samples before force-splitting for a
-  /// given per-frame geometry.
+  /// given frame hop.
   ///
-  /// Matches the upstream silero-vad derivation at the active frame size:
-  /// - `- frame_samples` because the split check runs on the next frame
-  ///   after the limit is exceeded — the timeline advances by the
-  ///   consuming segmenter's frame size (the sample rate's model chunk for
-  ///   the ONNX backend, but e.g. 4096 for another), not by `chunk_samples`
+  /// Matches the upstream silero-vad derivation at the active frame hop:
+  /// - `- frame_hop` because the split check runs on the next frame after
+  ///   the limit is exceeded — the timeline advances by the consuming
+  ///   segmenter's hop (the sample rate's model chunk for the ONNX
+  ///   backend, but e.g. 4096 for another), not by `chunk_samples`
   /// - `- 2 * speech_pad_samples` because emitted segments pad both the
   ///   end of the current segment and the start of the next one
   #[cfg_attr(not(tarpaulin), inline(always))]
-  pub(crate) fn max_speech_samples_for_frame(&self, frame_samples: u64) -> Option<u64> {
+  pub(crate) fn max_speech_samples_for_frame(&self, frame_hop: u64) -> Option<u64> {
     self.max_speech_duration.map(|duration| {
       ms_to_samples(duration, self.sample_rate)
-        .saturating_sub(frame_samples)
+        .saturating_sub(frame_hop)
         .saturating_sub(self.speech_pad_samples().saturating_mul(2))
     })
   }
@@ -454,11 +453,11 @@ mod tests {
   use super::{SampleRate, SpeechOptions, ms_to_samples};
 
   #[test]
-  fn sample_rate_contract_matches_silero_model() {
+  fn sample_rate_chunk_contract_matches_silero_model() {
+    // The legacy default frame hop. Context geometry (32/64) is
+    // Session-specific and lives with the Silero backend, not here.
     assert_eq!(SampleRate::Rate16k.chunk_samples(), 512);
-    assert_eq!(SampleRate::Rate16k.context_samples(), 64);
     assert_eq!(SampleRate::Rate8k.chunk_samples(), 256);
-    assert_eq!(SampleRate::Rate8k.context_samples(), 32);
   }
 
   #[test]
