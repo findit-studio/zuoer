@@ -137,7 +137,7 @@ use zuoer::{RunOptions, RunSegmenter, SampleRate};
 // the classifier produced; the timeline unit is the classifier's hop.
 let options = RunOptions::default()
     .with_sample_rate(SampleRate::Rate16k)
-    .with_start_threshold(0.6) // end threshold derives as 0.45
+    .with_start_threshold(0.6) // the end threshold derives 0.15 below
     .with_min_run_duration(Duration::from_millis(40))
     .with_min_gap_duration(Duration::from_millis(40))
     .with_pad(Duration::ZERO);
