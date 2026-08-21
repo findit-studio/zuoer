@@ -73,6 +73,16 @@ pub trait VadBackend {
   /// Feed PCM into the stream, invoking `sink` once per completed model
   /// frame with that frame's speech probability in `[0, 1]`.
   ///
+  /// `[0, 1]` is the backend's obligation, and the segmenter enforces it
+  /// rather than trusting it: a probability outside the range is
+  /// canonicalized on the way in — `NaN` to `0.0`, everything else clamped
+  /// — so a malformed frame degrades to silence (or to full confidence)
+  /// instead of poisoning a [`SpeechSegment`](crate::SpeechSegment)'s
+  /// aggregates. See
+  /// [`RunSegmenter::push_probability`](crate::RunSegmenter::push_probability)
+  /// for the exact policy. That repair is a backstop, not a licence: emit
+  /// in-range values.
+  ///
   /// The backend buffers whatever trailing PCM does not yet complete a
   /// frame and consumes it on later calls, advancing its own recurrent
   /// state and rolling context, so successive `push` calls form a single

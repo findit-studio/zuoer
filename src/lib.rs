@@ -1,18 +1,53 @@
-//! Backend-agnostic voice-activity-detection (VAD) core.
+//! Backend-agnostic voice-activity-detection (VAD) core, over a
+//! domain-neutral run segmenter.
 //!
-//! `zuoer` is the model-free heart of a VAD pipeline: the [`VadBackend`]
-//! seam that accepts PCM and emits speech probabilities through a `sink`,
-//! plus the backend-agnostic post-processing that turns a stream of those
-//! probabilities into [`SpeechSegment`]s — the [`SpeechSegmenter`]
-//! hysteresis state machine, its [`SpeechOptions`] timing/threshold
-//! configuration, and the one-shot [`detect_speech_with`] helper.
+//! `zuoer` is the model-free heart of a VAD pipeline. Two layers:
+//!
+//! - a **neutral core** — [`RunSegmenter`], the hysteresis state machine
+//!   that turns any frame-probability sequence into contiguous [`Run`]s,
+//!   configured by [`RunOptions`]. It knows nothing about speech: the same
+//!   machine segments sound-event probabilities, one instance per class.
+//! - a **VAD shell** — the [`VadBackend`] seam that accepts PCM and emits
+//!   speech probabilities through a `sink`, the [`SpeechSegment`] /
+//!   [`SpeechSegmenter`] / [`SpeechOptions`] names for the core, and the
+//!   one-shot [`detect_speech_with`] helper.
 //!
 //! It owns **no model, no inference runtime, and no audio I/O**. A model
 //! crate implements [`VadBackend`] over its own inference — for example an
 //! ONNX Silero backend or a CoreML backend — and drives the segmenter with
 //! this crate's post-processing. The segmentation semantics are the
 //! Silero-VAD-derived hysteresis rules; a backend declaring a different
-//! frame geometry reuses them unchanged (see [`SpeechSegmenter`]).
+//! frame geometry reuses them unchanged (see [`RunSegmenter`]).
+//!
+//! # Shell correspondence
+//!
+//! The `Speech*` surface is a set of **plain type aliases** plus
+//! forwarding accessors — no wrapper, no conversion, no behavioural
+//! difference. Code written against either spelling interoperates freely.
+//!
+//! | speech name | neutral name |
+//! |---|---|
+//! | [`SpeechSegment`] | [`Run`] |
+//! | [`SpeechSegmenter`] / [`SpeechDetector`] | [`RunSegmenter`] |
+//! | [`SpeechOptions`] | [`RunOptions`] |
+//! | [`SpeechOptions::min_speech_duration`] | [`RunOptions::min_run_duration`] |
+//! | [`SpeechOptions::min_silence_duration`] | [`RunOptions::min_gap_duration`] |
+//! | [`SpeechOptions::min_silence_at_max_speech`] | [`RunOptions::min_gap_at_max_run`] |
+//! | [`SpeechOptions::max_speech_duration`] | [`RunOptions::max_run_duration`] |
+//! | [`SpeechOptions::speech_pad`] | [`RunOptions::pad`] |
+//! | [`SpeechOptions::min_speech_samples`] | [`RunOptions::min_run_samples`] |
+//! | [`SpeechOptions::min_silence_samples`] | [`RunOptions::min_gap_samples`] |
+//! | [`SpeechOptions::min_silence_at_max_speech_samples`] | [`RunOptions::min_gap_at_max_run_samples`] |
+//! | [`SpeechOptions::max_speech_samples`] | [`RunOptions::max_run_samples`] |
+//! | [`SpeechOptions::speech_pad_samples`] | [`RunOptions::pad_samples`] |
+//!
+//! Each duration accessor's `with_*` / `set_*` builder pair follows the
+//! same mapping (`with_min_speech_duration` →
+//! [`with_min_run_duration`](RunOptions::with_min_run_duration), and so
+//! on). The segmenter's own method names — `push_probability`,
+//! `pop_pending`, `finish`, `reset`, `set_sample_rate`, `set_frame_hop` —
+//! and [`Run`]'s accessors are already neutral and are spelled the same in
+//! both surfaces.
 //!
 //! # Backend seam
 //!
@@ -29,18 +64,17 @@
 //!
 //! # Streaming seam
 //!
-//! [`SpeechSegmenter::push_probability`] consumes one frame probability and
-//! returns any segment it closes directly. A streaming backend driver runs
+//! [`RunSegmenter::push_probability`] consumes one frame probability and
+//! returns any run it closes directly. A streaming backend driver runs
 //! the backend over incoming PCM to obtain frame probabilities, hands them
-//! to [`SpeechSegmenter::push_probabilities`] (which buffers closed
-//! segments), and drains them in order with
-//! [`SpeechSegmenter::pop_pending`] / [`SpeechSegmenter::finish`]. This is
-//! the sans-I/O plumbing the backend crates build their probability feeders
-//! on top of.
+//! to [`RunSegmenter::push_probabilities`] (which buffers closed runs),
+//! and drains them in order with [`RunSegmenter::pop_pending`] /
+//! [`RunSegmenter::finish`]. This is the sans-I/O plumbing the backend
+//! crates build their probability feeders on top of.
 //!
 //! # Feature flags
 //!
-//! - `serde` — derive `Serialize`/`Deserialize` for [`SpeechOptions`] and
+//! - `serde` — derive `Serialize`/`Deserialize` for [`RunOptions`] and
 //!   [`SampleRate`] (`Duration` fields via `humantime-serde`).
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
@@ -51,8 +85,10 @@ mod backend;
 mod detector;
 mod error;
 mod options;
+mod run;
 
 pub use backend::VadBackend;
 pub use detector::{SpeechDetector, SpeechSegment, SpeechSegmenter, detect_speech_with};
 pub use error::{Error, Result};
-pub use options::{SampleRate, SpeechOptions};
+pub use options::{RunOptions, SampleRate, SpeechOptions};
+pub use run::{Run, RunSegmenter};
