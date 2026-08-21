@@ -120,6 +120,48 @@ let segments = detect_speech_with(&mut backend, &audio, SpeechOptions::default()
 For streaming, feed frame probabilities to `SpeechSegmenter::push_probabilities`
 and drain closed segments with `pop_pending` (and `finish` at end-of-stream).
 
+### The neutral core, without audio
+
+Nothing above the frame probabilities is required. Drive `RunSegmenter` with
+`RunOptions` directly and it segments any per-frame score — one instance per
+sound-event class, no `VadBackend` and no PCM in sight. Every emitted `Run`
+carries the mean and peak of the frames it was built from, which is where a
+consumer reads its confidence:
+
+```rust
+use std::time::Duration;
+
+use zuoer::{RunOptions, RunSegmenter, SampleRate};
+
+// One segmenter per class. The input is whatever per-frame probabilities
+// the classifier produced; the timeline unit is the classifier's hop.
+let options = RunOptions::default()
+    .with_sample_rate(SampleRate::Rate16k)
+    .with_start_threshold(0.6) // end threshold derives as 0.45
+    .with_min_run_duration(Duration::from_millis(40))
+    .with_min_gap_duration(Duration::from_millis(40))
+    .with_pad(Duration::ZERO);
+
+let mut dog_bark = RunSegmenter::new(options);
+dog_bark.set_frame_hop(320); // 20 ms per frame at 16 kHz
+
+dog_bark.push_probabilities(&[0.1, 0.9, 0.8, 0.95, 0.2, 0.05, 0.0]);
+
+// The run opened on the 0.9 frame and closed once the trailing gap
+// reached `min_gap_duration`.
+let run = dog_bark.pop_pending().expect("the gap closed the run");
+assert_eq!(run.start_sample(), 320); // 0.02 s
+assert_eq!(run.end_sample(), 1280); // 0.08 s
+
+// The aggregates span the run's raw frames only: the three above-threshold
+// frames, not the sub-threshold gap that closed it and not any padding.
+assert_eq!(run.peak_probability(), 0.95);
+assert!((run.mean_probability() - 0.883).abs() < 1e-3);
+
+// Nothing was left open at end of stream.
+assert!(dog_bark.finish().is_none());
+```
+
 ## Feature flags
 
 - `serde` — derive `Serialize`/`Deserialize` for `RunOptions` and `SampleRate`
@@ -130,6 +172,8 @@ and drain closed segments with `pop_pending` (and `finish` at end-of-stream).
 ## Consumers
 
 - [`silero`](https://github.com/Findit-AI/silero) — the ONNX Silero VAD backend.
+- [`coremlit`](https://github.com/findit-studio/coremlit) — the CoreML VAD
+  backend (not yet published to crates.io).
 
 #### License
 

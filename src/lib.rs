@@ -92,3 +92,15 @@ pub use detector::{SpeechDetector, SpeechSegment, SpeechSegmenter, detect_speech
 pub use error::{Error, Result};
 pub use options::{RunOptions, SampleRate, SpeechOptions};
 pub use run::{Run, RunSegmenter};
+
+/// Compile and run the `README.md` examples as doctests.
+///
+/// The README is the crate's front page and its examples are the first
+/// thing a reader copies, so they are held to the same standard as the
+/// rustdoc examples: `cargo test --doc` compiles and runs every fenced
+/// `rust` block in it. Gated on `cfg(doctest)` so the README text is not
+/// also rendered into the crate documentation, which carries its own
+/// hand-written overview above.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
