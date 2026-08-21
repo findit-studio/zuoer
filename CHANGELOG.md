@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `RunSegmenter::push_probability` now canonicalizes every frame probability
+  into `[0, 1]` before either the hysteresis comparisons or the aggregates see
+  it, so `Run::mean_probability` / `Run::peak_probability` on an emitted run
+  are always finite and in range. `VadBackend` documented `[0, 1]` but nothing
+  enforced it: a `NaN` frame inside an active run — including one bridged by
+  `min_gap_duration`, or flushed by `finish` — made the emitted mean `NaN`.
+  Before the 0.2 aggregates a malformed probability only ever reached a
+  threshold comparison and degraded safely to silence; the aggregates let it
+  escape as a value a consumer reads.
+  - `NaN` maps to `0.0`. Every comparison against `NaN` is false, so such a
+    frame already behaved as below-threshold — `0.0` preserves the 0.1
+    segmentation rather than changing it. (`f32::clamp` returns `NaN` for a
+    `NaN` input, so the mapping is explicit rather than a bare clamp.)
+  - Infinities and finite out-of-range values are clamped: at or above `1.0`
+    to `1.0`, at or below `0.0` to `0.0`. Each already compared to the
+    thresholds the way its clamped form does, so no boundary moves.
+  - One behavioural exception, now a pinned contract: with an effective
+    threshold of exactly `0.0`, `0.0 >= 0.0` holds where `NaN >= 0.0` did not,
+    so a `NaN` frame opens (zero start threshold) or sustains (zero end
+    threshold) a run it previously did not. Every configuration with positive
+    thresholds — including all defaults — segments identically.
+
 ## [0.2.0]
 
 ### Added

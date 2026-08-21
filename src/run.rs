@@ -32,8 +32,18 @@ use crate::options::{RunOptions, SampleRate};
 ///   continuation starts at. Frames in the gap that the split landed on
 ///   belong to neither run and appear in neither aggregate.
 ///
+/// Both aggregates on a run the [`RunSegmenter`] emits are always finite
+/// and inside `[0, 1]`, whatever the probability producer fed in:
+/// [`push_probability`](RunSegmenter::push_probability) canonicalizes
+/// every frame — `NaN` to `0.0`, everything else clamped — before it
+/// reaches either the state machine or the accumulator.
+///
 /// A [`Run`] built directly with [`new`](Self::new) has zeroed aggregates;
-/// only runs the [`RunSegmenter`] emits carry observed values.
+/// only runs the [`RunSegmenter`] emits carry observed values. The
+/// [`with_mean_probability`](Self::with_mean_probability) /
+/// [`with_peak_probability`](Self::with_peak_probability) setters store
+/// what the caller hands them, so the range guarantee above covers
+/// segmenter-emitted runs only.
 ///
 /// `Eq` is deliberately not implemented — the aggregates are floats.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -139,9 +149,13 @@ impl Run {
 /// O(1) running mean/peak over a set of frame probabilities.
 ///
 /// The sum is kept in `f64` so a long run does not lose the tail of its
-/// mean to `f32` rounding. `peak` starts at `f32::NEG_INFINITY` so the
-/// first observation always wins, rather than an all-negative (malformed)
-/// probability stream reporting a `0.0` peak it never observed.
+/// mean to `f32` rounding. Every observation arrives already canonicalized
+/// into `[0, 1]` by [`normalize_probability`] — the accumulator is never
+/// handed a `NaN`, an infinity, or an out-of-range value — so `sum`,
+/// [`mean`](Self::mean), and [`peak`](Self::peak) are always finite and in
+/// range. `peak` still starts at `f32::NEG_INFINITY` so the first
+/// observation wins outright instead of tying with a `0.0` seed the run
+/// never observed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Aggregate {
   sum: f64,
@@ -189,6 +203,22 @@ impl Aggregate {
   #[cfg_attr(not(tarpaulin), inline(always))]
   fn peak(&self) -> f32 {
     if self.count == 0 { 0.0 } else { self.peak }
+  }
+}
+
+/// Canonicalize one raw frame probability into `[0, 1]`.
+///
+/// `NaN` is mapped to `0.0` rather than clamped: `f32::clamp` returns
+/// `NaN` for a `NaN` input, so a bare clamp would let it straight through.
+/// See [`RunSegmenter::push_probability`] for the policy this implements
+/// and why `0.0` is the mapping that preserves the pre-aggregate
+/// behaviour.
+#[cfg_attr(not(tarpaulin), inline(always))]
+const fn normalize_probability(probability: f32) -> f32 {
+  if probability.is_nan() {
+    0.0
+  } else {
+    probability.clamp(0.0, 1.0)
   }
 }
 
@@ -417,7 +447,35 @@ impl RunSegmenter {
   /// runs for ordered draining — the shape a streaming backend driver
   /// needs — use [`push_probabilities`](Self::push_probabilities)
   /// followed by [`pop_pending`](Self::pop_pending).
+  ///
+  /// # Malformed probabilities
+  ///
+  /// [`VadBackend`](crate::VadBackend) documents `[0, 1]`; this is the one
+  /// place that contract is enforced rather than assumed. The value is
+  /// canonicalized before anything else reads it, and that single
+  /// canonical value drives **both** the hysteresis comparisons and the
+  /// run's aggregates, so the state machine and the aggregate can never
+  /// disagree about a frame:
+  ///
+  /// - `NaN` becomes `0.0` — silence. Every comparison against `NaN` is
+  ///   false, so a `NaN` frame already behaved as below-threshold; `0.0`
+  ///   keeps that segmentation instead of letting the frame escape into
+  ///   [`mean_probability`](Run::mean_probability) as a `NaN` a consumer
+  ///   would read. The sole configuration where the two differ is a
+  ///   threshold of exactly `0.0`, which `0.0` satisfies (`0.0 >= 0.0`)
+  ///   and `NaN` did not: there, a `NaN` frame now opens or sustains a
+  ///   run.
+  /// - everything else is clamped into range: `f32::INFINITY` and any
+  ///   value above `1.0` become `1.0`; `f32::NEG_INFINITY` and any value
+  ///   below `0.0` become `0.0`. Each of those already compared to the
+  ///   thresholds the way its clamped form does, so clamping moves no
+  ///   boundary at all.
+  ///
+  /// The repair keeps a malformed frame from corrupting a value a
+  /// consumer reads; it is not a licence to emit out-of-range
+  /// probabilities.
   pub fn push_probability(&mut self, probability: f32) -> Option<Run> {
+    let probability = normalize_probability(probability);
     let frame_hop = self.frame_hop;
     let frame_start = self.current_sample;
     self.current_sample = self.current_sample.saturating_add(frame_hop);
@@ -915,5 +973,372 @@ mod tests {
     assert_close(annotated.peak_probability(), 0.9, "peak");
     assert_eq!(annotated.start_sample(), run.start_sample());
     assert_eq!(annotated.end_sample(), run.end_sample());
+  }
+
+  /// Malformed inputs whose canonical value is `0.0`: `NaN` (mapped, not
+  /// clamped) and everything at or below the bottom of the range.
+  const LOW_INVALID: [(f32, &str); 3] = [
+    (f32::NAN, "NaN"),
+    (f32::NEG_INFINITY, "-inf"),
+    (-1.0, "finite -1.0"),
+  ];
+
+  /// Malformed inputs whose canonical value is `1.0`: everything at or
+  /// above the top of the range.
+  const HIGH_INVALID: [(f32, &str); 2] = [(f32::INFINITY, "+inf"), (2.0, "finite 2.0")];
+
+  /// Every emitted run's aggregates must be finite and inside `[0, 1]`,
+  /// whatever the producer fed in. This is the invariant the
+  /// `push_probability` normalization exists to hold.
+  #[track_caller]
+  fn assert_in_range(run: &Run, what: &str) {
+    let mean = run.mean_probability();
+    let peak = run.peak_probability();
+    assert!(
+      mean.is_finite() && (0.0..=1.0).contains(&mean),
+      "{what}: mean {mean} is not a finite probability in [0, 1]"
+    );
+    assert!(
+      peak.is_finite() && (0.0..=1.0).contains(&peak),
+      "{what}: peak {peak} is not a finite probability in [0, 1]"
+    );
+  }
+
+  #[track_caller]
+  fn assert_all_in_range(runs: &[Run], what: &str) {
+    for (index, run) in runs.iter().enumerate() {
+      assert_in_range(run, &format!("{what} run {index}"));
+    }
+  }
+
+  fn open_options() -> RunOptions {
+    RunOptions::default()
+      .with_min_run_duration(Duration::ZERO)
+      .with_pad(Duration::ZERO)
+  }
+
+  /// Close path 1 (a gap longer than `min_gap_duration` closes the run),
+  /// above-range input. `+inf` / `2.0` land on an active frame and both
+  /// canonicalize to `1.0`, so the three-frame run means `2.2 / 3` and
+  /// peaks at exactly `1.0`.
+  ///
+  /// Mutation (drop the normalization): `+inf` gives an infinite mean and
+  /// peak; `2.0` gives mean `1.0667` and peak `2.0`. Red.
+  #[test]
+  fn normal_close_clamps_above_range_probabilities() {
+    for (invalid, name) in HIGH_INVALID {
+      let mut segmenter = RunSegmenter::new(open_options());
+      let mut probabilities = vec![0.6, invalid, 0.6];
+      probabilities.extend([0.0; 5]);
+
+      let runs = collect(&mut segmenter, &probabilities);
+
+      assert_eq!(runs.len(), 1, "{name}");
+      assert_all_in_range(&runs, name);
+      assert_eq!(runs[0].start_sample(), 0, "{name}");
+      assert_eq!(runs[0].end_sample(), 3 * HOP, "{name}");
+      assert_close(
+        runs[0].mean_probability(),
+        2.2 / 3.0,
+        &format!("{name} mean"),
+      );
+      assert_close(runs[0].peak_probability(), 1.0, &format!("{name} peak"));
+    }
+  }
+
+  /// Close path 1, below-range input. `NaN` / `-inf` / `-1.0` all
+  /// canonicalize to `0.0`, so the malformed frame opens a one-frame gap
+  /// that the next frame bridges: three observations, mean `1.2 / 3`,
+  /// peak `0.6`.
+  ///
+  /// Mutation: `NaN` gives a `NaN` mean, `-inf` an infinite one, and
+  /// `-1.0` mean `0.0667`. Red.
+  #[test]
+  fn normal_close_maps_below_range_probabilities_to_silence() {
+    for (invalid, name) in LOW_INVALID {
+      let mut segmenter = RunSegmenter::new(open_options());
+      let mut probabilities = vec![0.6, invalid, 0.6];
+      probabilities.extend([0.0; 5]);
+
+      let runs = collect(&mut segmenter, &probabilities);
+
+      assert_eq!(runs.len(), 1, "{name}");
+      assert_all_in_range(&runs, name);
+      assert_eq!(runs[0].start_sample(), 0, "{name}");
+      assert_eq!(runs[0].end_sample(), 3 * HOP, "{name}");
+      assert_close(runs[0].mean_probability(), 0.4, &format!("{name} mean"));
+      assert_close(runs[0].peak_probability(), 0.6, &format!("{name} peak"));
+    }
+  }
+
+  /// Close path 2 (a bridged gap), below-range input inside the gap. The
+  /// bridged frames are part of the run, so the malformed one reaches the
+  /// aggregate as `0.0`: seven observations — `0.6, 0.6`, three bridged
+  /// zeros, `0.6, 0.6` — mean `2.4 / 7`, peak `0.6`.
+  ///
+  /// Mutation: `NaN` / `-inf` poison the mean; `-1.0` gives `0.2`. Red.
+  #[test]
+  fn bridged_gap_maps_below_range_probabilities_to_silence() {
+    for (invalid, name) in LOW_INVALID {
+      let mut segmenter = RunSegmenter::new(open_options());
+      let mut probabilities = vec![0.6, 0.6, 0.0, invalid, 0.0, 0.6, 0.6];
+      probabilities.extend([0.0; 5]);
+
+      let runs = collect(&mut segmenter, &probabilities);
+
+      assert_eq!(runs.len(), 1, "{name}");
+      assert_all_in_range(&runs, name);
+      assert_eq!(runs[0].start_sample(), 0, "{name}");
+      assert_eq!(runs[0].end_sample(), 7 * HOP, "{name}");
+      assert_close(
+        runs[0].mean_probability(),
+        2.4 / 7.0,
+        &format!("{name} mean"),
+      );
+      assert_close(runs[0].peak_probability(), 0.6, &format!("{name} peak"));
+    }
+  }
+
+  /// Close path 2, above-range input on the frame that BRIDGES the gap.
+  /// The malformed frame is what re-opens the run, and it is aggregated as
+  /// `1.0`: eight observations, mean `3.4 / 8`, peak `1.0`.
+  ///
+  /// Mutation: `+inf` poisons mean and peak; `2.0` gives mean `0.55` and
+  /// peak `2.0`. Red.
+  #[test]
+  fn bridged_gap_clamps_the_bridging_frame() {
+    for (invalid, name) in HIGH_INVALID {
+      let mut segmenter = RunSegmenter::new(open_options());
+      let mut probabilities = vec![0.6, 0.6, 0.0, invalid, 0.0, 0.0, 0.6, 0.6];
+      probabilities.extend([0.0; 5]);
+
+      let runs = collect(&mut segmenter, &probabilities);
+
+      assert_eq!(runs.len(), 1, "{name}");
+      assert_all_in_range(&runs, name);
+      assert_eq!(runs[0].start_sample(), 0, "{name}");
+      assert_eq!(runs[0].end_sample(), 8 * HOP, "{name}");
+      assert_close(runs[0].mean_probability(), 0.425, &format!("{name} mean"));
+      assert_close(runs[0].peak_probability(), 1.0, &format!("{name} peak"));
+    }
+  }
+
+  /// Close path 3 (a `max_run_duration` force-split), above-range input in
+  /// the split-off run. Five observations before the split, mean
+  /// `3.4 / 5`, peak `1.0`; the continuation is clean.
+  ///
+  /// Mutation: `+inf` poisons the split run; `2.0` gives mean `0.88` and
+  /// peak `2.0`. Red.
+  #[test]
+  fn force_split_clamps_above_range_probabilities() {
+    for (invalid, name) in HIGH_INVALID {
+      let options = open_options().with_max_run_duration(Duration::from_millis(160));
+      let mut segmenter = RunSegmenter::new(options);
+      let mut probabilities = vec![0.6, invalid, 0.6, 0.6, 0.6];
+      probabilities.extend([0.8; 3]);
+
+      let runs = collect(&mut segmenter, &probabilities);
+
+      assert_eq!(runs.len(), 2, "{name}");
+      assert_all_in_range(&runs, name);
+      assert_eq!(runs[0].end_sample(), 5 * HOP, "{name}");
+      assert_close(
+        runs[0].mean_probability(),
+        0.68,
+        &format!("{name} split mean"),
+      );
+      assert_close(
+        runs[0].peak_probability(),
+        1.0,
+        &format!("{name} split peak"),
+      );
+      assert_eq!(runs[1].start_sample(), 5 * HOP, "{name}");
+      assert_close(
+        runs[1].mean_probability(),
+        0.8,
+        &format!("{name} continuation mean"),
+      );
+    }
+  }
+
+  /// Close path 3, below-range input bridged into the split-off run: five
+  /// observations, mean `2.4 / 5`, peak `0.6`.
+  ///
+  /// Mutation: `NaN` / `-inf` poison the split run's mean; `-1.0` gives
+  /// `0.28`. Red.
+  #[test]
+  fn force_split_maps_below_range_probabilities_to_silence() {
+    for (invalid, name) in LOW_INVALID {
+      let options = open_options().with_max_run_duration(Duration::from_millis(160));
+      let mut segmenter = RunSegmenter::new(options);
+      let mut probabilities = vec![0.6, invalid, 0.6, 0.6, 0.6];
+      probabilities.extend([0.8; 3]);
+
+      let runs = collect(&mut segmenter, &probabilities);
+
+      assert_eq!(runs.len(), 2, "{name}");
+      assert_all_in_range(&runs, name);
+      assert_eq!(runs[0].end_sample(), 5 * HOP, "{name}");
+      assert_close(
+        runs[0].mean_probability(),
+        0.48,
+        &format!("{name} split mean"),
+      );
+      assert_close(
+        runs[0].peak_probability(),
+        0.6,
+        &format!("{name} split peak"),
+      );
+      assert_eq!(runs[1].start_sample(), 5 * HOP, "{name}");
+      assert_close(
+        runs[1].mean_probability(),
+        0.8,
+        &format!("{name} continuation mean"),
+      );
+    }
+  }
+
+  /// Close path 4 (`finish` flushes the trailing run), below-range input
+  /// in the unclosed trailing gap — which `take_trailing` folds in, so the
+  /// malformed frame reaches the aggregate as `0.0`: mean `1.2 / 3`.
+  ///
+  /// Mutation: `NaN` / `-inf` poison the mean; `-1.0` gives `0.0667`. Red.
+  #[test]
+  fn finish_maps_below_range_probabilities_to_silence() {
+    for (invalid, name) in LOW_INVALID {
+      let mut segmenter = RunSegmenter::new(open_options());
+
+      let runs = collect(&mut segmenter, &[0.6, 0.6, invalid]);
+
+      assert_eq!(runs.len(), 1, "{name}");
+      assert_all_in_range(&runs, name);
+      assert_eq!(runs[0].end_sample(), 3 * HOP, "{name}");
+      assert_close(runs[0].mean_probability(), 0.4, &format!("{name} mean"));
+      assert_close(runs[0].peak_probability(), 0.6, &format!("{name} peak"));
+    }
+  }
+
+  /// Close path 4, above-range input inside the trailing run.
+  ///
+  /// Mutation: `+inf` poisons mean and peak; `2.0` gives mean `1.0667`
+  /// and peak `2.0`. Red.
+  #[test]
+  fn finish_clamps_above_range_probabilities() {
+    for (invalid, name) in HIGH_INVALID {
+      let mut segmenter = RunSegmenter::new(open_options());
+
+      let runs = collect(&mut segmenter, &[0.6, invalid, 0.6]);
+
+      assert_eq!(runs.len(), 1, "{name}");
+      assert_all_in_range(&runs, name);
+      assert_eq!(runs[0].end_sample(), 3 * HOP, "{name}");
+      assert_close(
+        runs[0].mean_probability(),
+        2.2 / 3.0,
+        &format!("{name} mean"),
+      );
+      assert_close(runs[0].peak_probability(), 1.0, &format!("{name} peak"));
+    }
+  }
+
+  fn boundaries(options: RunOptions, probabilities: &[f32]) -> Vec<(u64, u64)> {
+    let mut segmenter = RunSegmenter::new(options);
+    collect(&mut segmenter, probabilities)
+      .iter()
+      .map(|run| (run.start_sample(), run.end_sample()))
+      .collect()
+  }
+
+  /// The `NaN` -> `0.0` mapping is behaviour-preserving for the state
+  /// machine whenever both effective thresholds are above zero (every
+  /// default configuration): a `NaN` compared against a positive threshold
+  /// is false, and so is `0.0`, so the identical branch is taken on every
+  /// comparison in `push_probability` and `split_at_max_duration`.
+  ///
+  /// This test is the evidence, and it is the one test here that must stay
+  /// GREEN with the normalization removed: it asserts that substituting
+  /// `NaN` for a `0.0` frame moves no boundary, mid-run (bridged), inside
+  /// a closing gap, and on the frame a force-split decides its
+  /// continuation from.
+  #[test]
+  fn nan_frames_do_not_move_segment_boundaries() {
+    // A NaN mid-run (bridged), plus a NaN inside the gap that closes the
+    // first run.
+    let mut with_nan = vec![0.6, 0.6, f32::NAN, 0.6, 0.6];
+    with_nan.extend([0.0, f32::NAN, 0.0, 0.0, 0.0]);
+    with_nan.extend([0.6, 0.6]);
+    with_nan.extend([0.0; 5]);
+    let with_zero: Vec<f32> = with_nan
+      .iter()
+      .map(|p| if p.is_nan() { 0.0 } else { *p })
+      .collect();
+
+    let nan_boundaries = boundaries(open_options(), &with_nan);
+    assert_eq!(
+      nan_boundaries,
+      boundaries(open_options(), &with_zero),
+      "a NaN frame must segment exactly like the 0.0 frame it stands for"
+    );
+    assert_eq!(
+      nan_boundaries,
+      vec![(0, 5 * HOP), (10 * HOP, 12 * HOP)],
+      "and both must match the pinned boundaries"
+    );
+
+    // A NaN on the frame that a force-split reads to decide whether to
+    // open a continuation run (`probability >= start_threshold`).
+    let split_options = open_options().with_max_run_duration(Duration::from_millis(160));
+    let mut with_nan = vec![0.6; 5];
+    with_nan.push(f32::NAN);
+    with_nan.extend([0.6; 3]);
+    let with_zero: Vec<f32> = with_nan
+      .iter()
+      .map(|p| if p.is_nan() { 0.0 } else { *p })
+      .collect();
+
+    let nan_boundaries = boundaries(split_options.clone(), &with_nan);
+    assert_eq!(
+      nan_boundaries,
+      boundaries(split_options, &with_zero),
+      "a NaN at the split decision frame must segment exactly like 0.0"
+    );
+    assert_eq!(
+      nan_boundaries,
+      vec![(0, 5 * HOP), (6 * HOP, 9 * HOP)],
+      "and both must match the pinned boundaries"
+    );
+  }
+
+  /// The documented exception to the paragraph above: a threshold of
+  /// exactly `0.0` is the one configuration where `NaN` and `0.0` compare
+  /// differently, because `0.0 >= 0.0` holds. With a zero start threshold
+  /// a `NaN` frame now OPENS a run; with a zero end threshold it now
+  /// SUSTAINS one. Pinned so the exception is a tested contract rather
+  /// than a surprise.
+  #[test]
+  fn zero_thresholds_are_the_documented_exception() {
+    let options = open_options()
+      .with_start_threshold(0.0)
+      .with_min_gap_duration(Duration::ZERO);
+    let mut segmenter = RunSegmenter::new(options);
+
+    let runs = collect(&mut segmenter, &[f32::NAN, 0.0]);
+
+    assert_eq!(runs.len(), 1, "a zero start threshold opens on NaN -> 0.0");
+    assert_all_in_range(&runs, "zero start threshold");
+    assert_eq!(runs[0].start_sample(), 0);
+    assert_eq!(runs[0].end_sample(), HOP);
+
+    let options = open_options()
+      .with_end_threshold(0.0)
+      .with_min_gap_duration(Duration::ZERO);
+    let mut segmenter = RunSegmenter::new(options);
+
+    let runs = collect(&mut segmenter, &[0.6, f32::NAN, 0.6]);
+
+    assert_eq!(runs.len(), 1, "a zero end threshold sustains through NaN");
+    assert_all_in_range(&runs, "zero end threshold");
+    assert_eq!(runs[0].end_sample(), 3 * HOP);
+    assert_close(runs[0].mean_probability(), 0.4, "mean");
   }
 }
