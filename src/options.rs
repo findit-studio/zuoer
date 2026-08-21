@@ -100,12 +100,12 @@ const fn default_pad() -> Duration {
 /// 0.1 still load.
 ///
 /// Deserialization is held to the same contract as the setters:
-/// `start_threshold` and `end_threshold` are sanitized into `[0, 1]` on
-/// the way in exactly as [`Self::set_start_threshold`] /
-/// [`Self::set_end_threshold`] sanitize them, so a hand-edited profile
-/// cannot install a threshold no setter would have stored. Every field
-/// the serializer omits is optional on the way back in, so a serialized
-/// `RunOptions` always round-trips.
+/// `start_threshold` and `end_threshold` are clamped into
+/// [`[MIN_THRESHOLD, 1]`](RunOptions::MIN_THRESHOLD) on the way in
+/// exactly as [`Self::set_start_threshold`] / [`Self::set_end_threshold`]
+/// clamp them, so a hand-edited profile cannot install a threshold no
+/// setter would have stored. Every field the serializer omits is optional
+/// on the way back in, so a serialized `RunOptions` always round-trips.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RunOptions {
@@ -191,6 +191,37 @@ impl Default for RunOptions {
 }
 
 impl RunOptions {
+  /// The lowest threshold these options will store.
+  ///
+  /// [`start_threshold`](Self::start_threshold) and an explicitly set
+  /// [`end_threshold`](Self::end_threshold) are clamped into
+  /// `[MIN_THRESHOLD, 1.0]` — on the setter path and, with the `serde`
+  /// feature, on the deserialize path alike — and the derived end
+  /// threshold bottoms out at the same value. Two properties follow, and
+  /// the rest of the crate depends on both:
+  ///
+  /// - **Every effective threshold is strictly positive.** A frame that
+  ///   [`RunSegmenter::push_probability`](crate::RunSegmenter::push_probability)
+  ///   canonicalizes to `0.0` therefore satisfies no threshold, which is
+  ///   what makes that canonicalization behaviour-preserving rather than
+  ///   an exception to reason about.
+  /// - **The hysteresis window is never inverted**:
+  ///   `end_threshold() <= start_threshold()` for every start threshold
+  ///   these options can hold. An inverted window is not cosmetic: a
+  ///   frame in the resulting `[start, end)` band satisfies the start
+  ///   comparison — which clears the tentative gap and restarts it on the
+  ///   same frame — without satisfying the end comparison that sustains
+  ///   the run, so the gap age never grows and the run never closes.
+  ///
+  /// `0.01` rather than an arbitrarily small positive value: it is
+  /// already the floor of the derived end threshold (`start - 0.15`,
+  /// floored), so the two agree by construction instead of by
+  /// coincidence — which is what makes the non-inversion property
+  /// provable. It is also the point below which a threshold stops
+  /// discriminating: nothing under one percent rejects a frame a
+  /// detector would realistically emit.
+  pub const MIN_THRESHOLD: f32 = 0.01;
+
   /// Create a new `RunOptions` with default values.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn new() -> Self {
@@ -213,7 +244,11 @@ impl RunOptions {
     self.sample_rate
   }
 
-  /// Returns the start threshold, which is the minimum probability required to open a run.
+  /// Returns the start threshold, which is the minimum probability
+  /// required to open a run.
+  ///
+  /// Always in [`[MIN_THRESHOLD, 1]`](Self::MIN_THRESHOLD) — in
+  /// particular, always strictly positive.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn start_threshold(&self) -> f32 {
     self.start_threshold
@@ -225,6 +260,10 @@ impl RunOptions {
   /// window, this falls back to the same derived threshold used by the
   /// default configuration so behavior stays stable regardless of
   /// builder call order.
+  ///
+  /// Always in [`[MIN_THRESHOLD, 1]`](Self::MIN_THRESHOLD) and never
+  /// above [`start_threshold`](Self::start_threshold), for every
+  /// threshold pair these options can hold.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn end_threshold(&self) -> f32 {
     effective_end_threshold(
@@ -331,7 +370,14 @@ impl RunOptions {
     self
   }
 
-  /// Set the start threshold, which must be between 0 and 1. If not set, it defaults to 0.5.
+  /// Set the start threshold, the minimum probability required to open a
+  /// run. Defaults to `0.5`.
+  ///
+  /// The value is clamped into
+  /// [`[MIN_THRESHOLD, 1]`](Self::MIN_THRESHOLD); a non-finite one
+  /// becomes `MIN_THRESHOLD`. A start threshold is therefore always
+  /// strictly positive — `0.0` ("every frame opens a run") is not a
+  /// configuration these options can express.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn with_start_threshold(mut self, threshold: f32) -> Self {
     self.set_start_threshold(threshold);
@@ -340,11 +386,13 @@ impl RunOptions {
 
   /// Set the preferred end threshold.
   ///
-  /// The stored value is sanitized into the `[0, 1]` range. When the
-  /// threshold is later read via [`Self::end_threshold`], it is also
-  /// checked against the current start threshold. Invalid combinations
-  /// fall back to the default derived hysteresis rule even if builder
-  /// methods are called in a different order.
+  /// The stored value is clamped into
+  /// [`[MIN_THRESHOLD, 1]`](Self::MIN_THRESHOLD), so it is always
+  /// strictly positive. When the threshold is later read via
+  /// [`Self::end_threshold`], it is also checked against the current
+  /// start threshold. Invalid combinations fall back to the default
+  /// derived hysteresis rule even if builder methods are called in a
+  /// different order.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn with_end_threshold(mut self, threshold: f32) -> Self {
     self.set_end_threshold(threshold);
@@ -407,23 +455,32 @@ impl RunOptions {
     self
   }
 
-  /// Set the start threshold, which must be between 0 and 1. If not set, it defaults to 0.5.
+  /// Set the start threshold, the minimum probability required to open a
+  /// run. Defaults to `0.5`.
+  ///
+  /// The value is clamped into
+  /// [`[MIN_THRESHOLD, 1]`](Self::MIN_THRESHOLD); a non-finite one
+  /// becomes `MIN_THRESHOLD`. A start threshold is therefore always
+  /// strictly positive — `0.0` ("every frame opens a run") is not a
+  /// configuration these options can express.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn set_start_threshold(&mut self, threshold: f32) -> &mut Self {
-    self.start_threshold = sanitize_probability(threshold);
+    self.start_threshold = sanitize_threshold(threshold);
     self
   }
 
   /// Set the preferred end threshold.
   ///
-  /// The stored value is sanitized into the `[0, 1]` range. When the
-  /// threshold is later read via [`Self::end_threshold`], it is also
-  /// checked against the current start threshold. Invalid combinations
-  /// fall back to the default derived hysteresis rule even if builder
-  /// methods are called in a different order.
+  /// The stored value is clamped into
+  /// [`[MIN_THRESHOLD, 1]`](Self::MIN_THRESHOLD), so it is always
+  /// strictly positive. When the threshold is later read via
+  /// [`Self::end_threshold`], it is also checked against the current
+  /// start threshold. Invalid combinations fall back to the default
+  /// derived hysteresis rule even if builder methods are called in a
+  /// different order.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn set_end_threshold(&mut self, threshold: f32) -> &mut Self {
-    self.end_threshold = Some(sanitize_probability(threshold));
+    self.end_threshold = Some(sanitize_threshold(threshold));
     self
   }
 
@@ -666,12 +723,18 @@ pub(crate) const fn ms_to_samples(duration: Duration, sample_rate: SampleRate) -
   }
 }
 
+/// Clamp a threshold into the permitted `[MIN_THRESHOLD, 1.0]` range.
+///
+/// A non-finite threshold has no ordering against frame probabilities at
+/// all, so it becomes the floor — the least permissive interpretation of
+/// "unusable input" that is still a threshold. See
+/// [`RunOptions::MIN_THRESHOLD`] for why the floor is strictly positive.
 #[inline]
-const fn sanitize_probability(value: f32) -> f32 {
+const fn sanitize_threshold(value: f32) -> f32 {
   if value.is_finite() {
-    value.clamp(0.0, 1.0)
+    value.clamp(RunOptions::MIN_THRESHOLD, 1.0)
   } else {
-    0.0
+    RunOptions::MIN_THRESHOLD
   }
 }
 
@@ -679,16 +742,16 @@ const fn sanitize_probability(value: f32) -> f32 {
 ///
 /// The derived `Deserialize` writes fields directly and never calls
 /// [`RunOptions::set_start_threshold`], so without this a persisted
-/// profile could install a negative or non-finite threshold that no
-/// setter would have stored. Deserialization is an input boundary like
-/// any other; it applies the same [`sanitize_probability`] the setters
-/// do, so both paths store the same value for the same input.
+/// profile could install a zero, negative, or non-finite threshold that
+/// no setter would have stored. Deserialization is an input boundary
+/// like any other; it applies the same [`sanitize_threshold`] the
+/// setters do, so both paths store the same value for the same input.
 #[cfg(feature = "serde")]
 fn deserialize_threshold<'de, D>(deserializer: D) -> core::result::Result<f32, D::Error>
 where
   D: serde::Deserializer<'de>,
 {
-  Ok(sanitize_probability(f32::deserialize(deserializer)?))
+  Ok(sanitize_threshold(f32::deserialize(deserializer)?))
 }
 
 /// The [`Option`] form of [`deserialize_threshold`], for the
@@ -704,18 +767,32 @@ fn deserialize_optional_threshold<'de, D>(
 where
   D: serde::Deserializer<'de>,
 {
-  Ok(Option::<f32>::deserialize(deserializer)?.map(sanitize_probability))
+  Ok(Option::<f32>::deserialize(deserializer)?.map(sanitize_threshold))
 }
 
+/// The end threshold derived from a start threshold when none was set.
+///
+/// A fixed `0.15` of hysteresis below the start threshold, floored at
+/// [`RunOptions::MIN_THRESHOLD`]. Because the start threshold shares that
+/// floor, the result is never above it: for `start >= 0.16` the
+/// subtraction wins and is strictly below `start`, and for a smaller
+/// `start` the floor wins and equals `MIN_THRESHOLD <= start`.
 #[inline]
 const fn default_end_threshold(start_threshold: f32) -> f32 {
-  sanitize_probability((sanitize_probability(start_threshold) - 0.15).max(0.01))
+  sanitize_threshold((sanitize_threshold(start_threshold) - 0.15).max(RunOptions::MIN_THRESHOLD))
 }
 
+/// Resolve the end threshold actually used, rejecting a configured value
+/// that would invert the hysteresis window in favour of the derived one.
+///
+/// Both branches return a value at most `start_threshold` and at least
+/// [`RunOptions::MIN_THRESHOLD`], so the window is never inverted and the
+/// end threshold is never zero, whatever the caller supplied and in
+/// whatever builder order.
 #[inline]
 const fn effective_end_threshold(start_threshold: f32, end_threshold: f32) -> f32 {
-  let start_threshold = sanitize_probability(start_threshold);
-  let end_threshold = sanitize_probability(end_threshold);
+  let start_threshold = sanitize_threshold(start_threshold);
+  let end_threshold = sanitize_threshold(end_threshold);
 
   if end_threshold < start_threshold {
     end_threshold
@@ -728,7 +805,7 @@ const fn effective_end_threshold(start_threshold: f32, end_threshold: f32) -> f3
 mod tests {
   use std::time::Duration;
 
-  use super::{SampleRate, SpeechOptions, ms_to_samples};
+  use super::{RunOptions, SampleRate, SpeechOptions, ms_to_samples};
 
   #[test]
   fn sample_rate_chunk_contract_matches_silero_model() {
@@ -803,6 +880,90 @@ mod tests {
     // A backend that declares a larger frame subtracts THAT frame for the
     // lookahead, not the 512-sample chunk: 16_000 − 4_096 − 2·480 = 10_944.
     assert_eq!(options.max_speech_samples_for_frame(4_096), Some(10_944));
+  }
+
+  /// Every threshold `RunOptions` stores is strictly positive. This is
+  /// what makes `push_probability`'s canonicalization behaviour-
+  /// preserving: a frame canonicalized to `0.0` is below every permitted
+  /// threshold, so it can neither open nor sustain a run.
+  ///
+  /// Mutation (clamp into `[0.0, 1.0]` as before): `0.0`, `-1.0`,
+  /// `-inf` and `NaN` all store `0.0`. Red.
+  #[test]
+  fn thresholds_are_clamped_strictly_above_zero() {
+    for (raw, name) in [
+      (0.0_f32, "zero"),
+      (-1.0, "finite negative"),
+      (f32::NEG_INFINITY, "-inf"),
+      (f32::NAN, "NaN"),
+      (RunOptions::MIN_THRESHOLD / 2.0, "below the floor"),
+    ] {
+      let options = SpeechOptions::default()
+        .with_start_threshold(raw)
+        .with_end_threshold(raw);
+
+      assert_eq!(
+        options.start_threshold(),
+        RunOptions::MIN_THRESHOLD,
+        "{name}: start threshold"
+      );
+      assert!(
+        options.start_threshold() > 0.0,
+        "{name}: start threshold must be strictly positive"
+      );
+      assert!(
+        options.end_threshold() > 0.0,
+        "{name}: end threshold must be strictly positive"
+      );
+    }
+  }
+
+  /// The hysteresis window is never inverted: for EVERY start threshold
+  /// the setters permit, with the end threshold derived or explicitly
+  /// set anywhere in the range, `end_threshold() <= start_threshold()`
+  /// and both are strictly positive.
+  ///
+  /// A start threshold below the derived end threshold's `0.01` floor is
+  /// what inverts it, and an inverted window is not cosmetic: a frame in
+  /// the `[start, end)` band satisfies the start comparison — which
+  /// clears the tentative gap and restarts it on the same frame —
+  /// without satisfying the end comparison that sustains the run, so the
+  /// gap age never grows and the run never closes.
+  ///
+  /// Mutation (drop the floor, or set it below `default_end_threshold`'s
+  /// own `0.01`): every start threshold under `0.01` derives an end
+  /// threshold above it. Red.
+  #[test]
+  fn the_hysteresis_window_is_never_inverted_across_the_permitted_range() {
+    for step in 0..=1_000u32 {
+      let raw = step as f32 / 1_000.0;
+      let derived = SpeechOptions::default().with_start_threshold(raw);
+      assert!(
+        derived.end_threshold() > 0.0,
+        "start {raw}: derived end threshold must be strictly positive"
+      );
+      assert!(
+        derived.end_threshold() <= derived.start_threshold(),
+        "start {raw}: derived end {} exceeds start {}",
+        derived.end_threshold(),
+        derived.start_threshold()
+      );
+
+      for end_step in 0..=20u32 {
+        let raw_end = end_step as f32 / 20.0;
+        let explicit = derived.clone().with_end_threshold(raw_end);
+        assert!(
+          explicit.end_threshold() > 0.0,
+          "start {raw} / end {raw_end}: end threshold must be strictly positive"
+        );
+        assert!(
+          explicit.end_threshold() <= explicit.start_threshold(),
+          "start {raw} / end {raw_end}: end {} exceeds start {}",
+          explicit.end_threshold(),
+          explicit.start_threshold()
+        );
+      }
+    }
   }
 }
 
@@ -930,5 +1091,43 @@ mod serde_tests {
       Some(Duration::from_millis(5_000))
     );
     assert_eq!(restored.pad(), Duration::from_millis(40));
+  }
+
+  /// The strictly-positive floor is a property of the stored value, not
+  /// of the setter, so it has to hold on the deserialize path too — path
+  /// parity is what the sanitizers exist for.
+  ///
+  /// Mutation (floor only in the setters): a persisted `0.0` installs a
+  /// zero start threshold the setters cannot produce. Red.
+  #[test]
+  fn the_threshold_floor_applies_on_the_serde_path_too() {
+    for (literal, raw) in [
+      ("0.0", 0.0_f32),
+      ("0.005", 0.005),
+      ("-1.0", -1.0),
+      ("-1e39", f32::NEG_INFINITY),
+    ] {
+      let json = format!(r#"{{"start_threshold": {literal}, "end_threshold": {literal}}}"#);
+      let restored: RunOptions = serde_json::from_str(&json).expect("deserialize");
+      let built = RunOptions::default()
+        .with_start_threshold(raw)
+        .with_end_threshold(raw);
+
+      assert_eq!(
+        restored.start_threshold(),
+        RunOptions::MIN_THRESHOLD,
+        "{literal}: start threshold is lifted to the floor"
+      );
+      assert_eq!(
+        restored.start_threshold(),
+        built.start_threshold(),
+        "{literal}: start threshold path parity"
+      );
+      assert_eq!(
+        serde_json::to_string(&restored).expect("re-serialize"),
+        serde_json::to_string(&built).expect("serialize"),
+        "{literal}: the stored fields must match the setter path"
+      );
+    }
   }
 }

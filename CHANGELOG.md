@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `RunOptions::MIN_THRESHOLD` (`0.01`): the lowest threshold the options type
+  will store, and the floor that makes both the strictly-positive-threshold
+  and the never-inverted-hysteresis properties hold by construction.
+
 ### Fixed
 
 - `RunSegmenter::push_probability` now canonicalizes every frame probability
@@ -24,27 +30,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `NaN` input, so the mapping is explicit rather than a bare clamp.)
   - Infinities and finite out-of-range values are clamped: at or above `1.0`
     to `1.0`, at or below `0.0` to `0.0`.
-  - One behavioural exception, now a pinned contract — and it is **not** about
-    `NaN`. It covers every input whose canonical value is `0.0`: `NaN`,
-    `f32::NEG_INFINITY`, and any finite negative alike. All of them are now
-    compared as `0.0`, and `0.0 >= 0.0` holds where the raw comparison did
-    not, so against a threshold of exactly `0.0` such a frame opens a run
-    (zero `start_threshold` — including the continuation run a
-    `max_run_duration` force-split decides on from the same comparison) or
-    sustains one (zero effective `end_threshold`) where it previously did
-    neither. Above-range inputs have no matching exception: `1.0` and
-    everything above it compare identically against any threshold in
-    `[0, 1]`. Every configuration with positive thresholds — including all
-    defaults — segments identically.
+  - Canonicalization changes no segmentation, in any configuration. Every
+    effective threshold is now strictly positive (see the threshold-floor
+    entry below), so a frame canonicalized to `0.0` fails every threshold
+    comparison exactly as the raw `NaN` or negative did, and a frame
+    canonicalized to `1.0` passes exactly the comparisons the raw
+    out-of-range value passed. The only case where the two could ever have
+    differed — an effective threshold of exactly `0.0`, where `0.0 >= 0.0`
+    holds but `NaN >= 0.0` does not — is no longer reachable.
 - **serde:** `RunOptions` / `SpeechOptions` deserialization no longer bypasses
-  threshold sanitization. `set_start_threshold` / `set_end_threshold` sanitize
-  into `[0, 1]`, but the derived `Deserialize` wrote fields directly, so a
+  threshold sanitization. `set_start_threshold` / `set_end_threshold` clamp
+  into the permitted range, but the derived `Deserialize` wrote fields
+  directly, so a
   persisted profile carrying a negative or non-finite threshold installed a
   value no setter would have stored — `start_threshold` was then read back
   raw, and a raw `end_threshold` re-serialized as garbage (or as `null`, for a
   non-finite value JSON cannot represent). Both fields now run the same
-  `sanitize_probability` on the way in, so the setter path and the serde path
+  threshold sanitizer on the way in, so the setter path and the serde path
   store the same value for the same input.
+- Thresholds are clamped into `[RunOptions::MIN_THRESHOLD, 1]` rather than
+  `[0, 1]`, on the setter path and the `serde` path alike, where the new
+  public `RunOptions::MIN_THRESHOLD` is `0.01`. A `start_threshold` of `0.0`
+  was accepted and was pathological: every frame satisfies `>= 0.0`, so every
+  frame opened a run, cleared the tentative gap, and restarted it on the same
+  frame — pinning the gap age at zero so an active run could be extended for
+  as long as frames kept arriving, and never closing it. `0.0` also derived an
+  `end_threshold` of `0.01`, i.e. ABOVE the start threshold, inverting the
+  hysteresis window. Neither configuration has a legitimate use — "every frame
+  is speech" is not a detector — so they are excluded rather than documented.
+  Two properties now hold for every options value the crate can produce, and
+  the canonicalization contract above rests on the first:
+  - every effective threshold is strictly positive;
+  - `end_threshold() <= start_threshold()`, because the derived end threshold
+    (`start - 0.15`) bottoms out at the same `0.01` the start threshold does.
+
+  A start threshold in `(0.0, 0.01)`, and an explicit end threshold in the
+  same band, are lifted to `0.01`; a non-finite threshold now becomes `0.01`
+  rather than `0.0`, so a mistyped `-1.0` can no longer land on the most
+  permissive setting there is. Callers using the defaults, or any threshold at
+  or above `0.01`, are unaffected.
 - **serde:** a default-constructed `RunOptions` now survives its own
   round-trip. `max_run_duration` is `skip_serializing_if = "Option::is_none"`
   and carries a `deserialize_with` (through `humantime_serde::option`), which

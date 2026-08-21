@@ -39,6 +39,14 @@ confidence and sound-event confidence alike. Both are always finite and inside
 hysteresis comparisons and the aggregates, so a malformed frame can never
 reach a consumer as a `NaN` confidence.
 
+Canonicalization changes no segmentation. Thresholds are clamped into
+`[RunOptions::MIN_THRESHOLD, 1]` (`0.01` at the bottom), so a frame
+canonicalized to `0.0` satisfies no threshold and a frame canonicalized to
+`1.0` satisfies every threshold it already satisfied — exactly as the raw
+value compared. The floor also keeps the hysteresis window from inverting:
+`end_threshold() <= start_threshold()` for every configuration the setters
+and the `serde` path can produce.
+
 ### Shell correspondence
 
 The `Speech*` surface is plain type aliases plus forwarding accessors — no
