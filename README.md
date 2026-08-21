@@ -15,16 +15,46 @@ Backend-agnostic voice-activity-detection (VAD) core.
 
 ## Introduction
 
-`zuoer` is the model-free heart of a VAD pipeline. It provides:
+`zuoer` is the model-free heart of a VAD pipeline, built on a domain-neutral
+core. It provides:
 
+- the **neutral run segmenter** — `RunSegmenter`, the hysteresis state machine
+  that turns any frame-probability sequence into contiguous `Run`s, configured
+  by `RunOptions`. It knows nothing about speech: the same machine segments
+  sound-event probabilities, one instance per class;
 - the **`VadBackend` seam** — the push-based contract (`frame_hop`,
   `sample_rate`, `push`, `finish`, `reset`, and an associated `Error`) that
   feeds PCM to a backend and emits speech probabilities through a `sink`, one
   per completed model frame;
-- the **backend-agnostic post-processing** that turns a stream of those
-  probabilities into speech segments: the `SpeechSegmenter` hysteresis state
-  machine, its `SpeechOptions` timing/threshold configuration, `SpeechSegment`,
-  and the one-shot `detect_speech_with` helper.
+- the **VAD shell** — `SpeechSegment` / `SpeechSegmenter` / `SpeechOptions`,
+  plain aliases for the neutral types, plus the one-shot `detect_speech_with`
+  helper.
+
+Every emitted `Run` carries the **mean and peak** of the frame probabilities
+over its raw model-frame span — padding excluded, bridged frames included,
+restarted at a force-split. That is the single source for VAD segment
+confidence and sound-event confidence alike.
+
+### Shell correspondence
+
+The `Speech*` surface is plain type aliases plus forwarding accessors — no
+wrapper, no conversion, no behavioural difference:
+
+| speech name | neutral name |
+|---|---|
+| `SpeechSegment` | `Run` |
+| `SpeechSegmenter` / `SpeechDetector` | `RunSegmenter` |
+| `SpeechOptions` | `RunOptions` |
+| `min_speech_duration` | `min_run_duration` |
+| `min_silence_duration` | `min_gap_duration` |
+| `min_silence_at_max_speech` | `min_gap_at_max_run` |
+| `max_speech_duration` | `max_run_duration` |
+| `speech_pad` | `pad` |
+
+The `*_samples` getters and the `with_*` / `set_*` builder pairs follow the
+same mapping. The segmenter's own methods (`push_probability`, `pop_pending`,
+`finish`, `reset`, `set_sample_rate`, `set_frame_hop`) and `Run`'s accessors
+are already neutral and are spelled the same in both surfaces.
 
 It owns **no model, no inference runtime, and no audio I/O**. A model crate
 implements `VadBackend` over its own inference — an ONNX Silero backend, a
@@ -80,8 +110,10 @@ and drain closed segments with `pop_pending` (and `finish` at end-of-stream).
 
 ## Feature flags
 
-- `serde` — derive `Serialize`/`Deserialize` for `SpeechOptions` and
-  `SampleRate` (`Duration` fields via `humantime-serde`).
+- `serde` — derive `Serialize`/`Deserialize` for `RunOptions` and `SampleRate`
+  (`Duration` fields via `humantime-serde`). Fields serialize under their
+  neutral names and also accept the 0.1 speech-flavoured names as
+  deserialization aliases.
 
 ## Consumers
 
