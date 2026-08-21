@@ -98,14 +98,35 @@ const fn default_pad() -> Duration {
 /// `max_run_duration`, `pad`). Each also accepts its 0.1 speech-flavoured
 /// name as a deserialization alias, so configuration profiles persisted by
 /// 0.1 still load.
+///
+/// Deserialization is held to the same contract as the setters:
+/// `start_threshold` and `end_threshold` are sanitized into `[0, 1]` on
+/// the way in exactly as [`Self::set_start_threshold`] /
+/// [`Self::set_end_threshold`] sanitize them, so a hand-edited profile
+/// cannot install a threshold no setter would have stored. Every field
+/// the serializer omits is optional on the way back in, so a serialized
+/// `RunOptions` always round-trips.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RunOptions {
   #[cfg_attr(feature = "serde", serde(default))]
   sample_rate: SampleRate,
-  #[cfg_attr(feature = "serde", serde(default = "default_start_threshold"))]
+  #[cfg_attr(
+    feature = "serde",
+    serde(
+      default = "default_start_threshold",
+      deserialize_with = "deserialize_threshold"
+    )
+  )]
   start_threshold: f32,
-  #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+  #[cfg_attr(
+    feature = "serde",
+    serde(
+      default,
+      skip_serializing_if = "Option::is_none",
+      deserialize_with = "deserialize_optional_threshold"
+    )
+  )]
   end_threshold: Option<f32>,
   #[cfg_attr(
     feature = "serde",
@@ -137,6 +158,7 @@ pub struct RunOptions {
   #[cfg_attr(
     feature = "serde",
     serde(
+      default,
       skip_serializing_if = "Option::is_none",
       alias = "max_speech_duration",
       with = "humantime_serde::option"
@@ -653,6 +675,38 @@ const fn sanitize_probability(value: f32) -> f32 {
   }
 }
 
+/// Sanitize a threshold arriving through `Deserialize`.
+///
+/// The derived `Deserialize` writes fields directly and never calls
+/// [`RunOptions::set_start_threshold`], so without this a persisted
+/// profile could install a negative or non-finite threshold that no
+/// setter would have stored. Deserialization is an input boundary like
+/// any other; it applies the same [`sanitize_probability`] the setters
+/// do, so both paths store the same value for the same input.
+#[cfg(feature = "serde")]
+fn deserialize_threshold<'de, D>(deserializer: D) -> core::result::Result<f32, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  Ok(sanitize_probability(f32::deserialize(deserializer)?))
+}
+
+/// The [`Option`] form of [`deserialize_threshold`], for the
+/// [`RunOptions::set_end_threshold`] field.
+///
+/// A `deserialize_with` on an `Option` field suppresses serde's implicit
+/// "a missing `Option` field is `None`" rule, so the field carries an
+/// explicit `#[serde(default)]` alongside this.
+#[cfg(feature = "serde")]
+fn deserialize_optional_threshold<'de, D>(
+  deserializer: D,
+) -> core::result::Result<Option<f32>, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  Ok(Option::<f32>::deserialize(deserializer)?.map(sanitize_probability))
+}
+
 #[inline]
 const fn default_end_threshold(start_threshold: f32) -> f32 {
   sanitize_probability((sanitize_probability(start_threshold) - 0.15).max(0.01))
@@ -783,6 +837,74 @@ mod serde_tests {
       Some(Duration::from_millis(5_000))
     );
     assert_eq!(restored.pad(), Duration::from_millis(40));
+  }
+
+  /// Deserialization must agree with the setters. `set_start_threshold` /
+  /// `set_end_threshold` sanitize into `[0, 1]`, so a persisted profile
+  /// carrying an out-of-range or non-finite threshold must not produce an
+  /// options value the setter path could not have produced.
+  ///
+  /// The re-serialized form is compared, not just the accessors:
+  /// `end_threshold()` sanitizes on read, so a raw stored value hides
+  /// behind the accessor and only surfaces on the next round-trip.
+  ///
+  /// Mutation: drop the `deserialize_with` sanitizers -> `-1.0` lands in
+  /// `start_threshold` verbatim, and `end_threshold` re-serializes as
+  /// `-1.0` (or as `null`, for a non-finite value JSON cannot carry).
+  /// Red.
+  #[test]
+  fn out_of_range_thresholds_are_sanitized_on_deserialize() {
+    for (literal, raw) in [
+      ("-1.0", -1.0_f32),
+      ("5.0", 5.0),
+      ("1e39", f32::INFINITY),
+      ("-1e39", f32::NEG_INFINITY),
+    ] {
+      let json = format!(r#"{{"start_threshold": {literal}, "end_threshold": {literal}}}"#);
+      let restored: RunOptions = serde_json::from_str(&json).expect("deserialize");
+      let built = RunOptions::default()
+        .with_start_threshold(raw)
+        .with_end_threshold(raw);
+
+      assert_eq!(
+        restored.start_threshold(),
+        built.start_threshold(),
+        "{literal}: start threshold"
+      );
+      assert_eq!(
+        serde_json::to_string(&restored).expect("re-serialize"),
+        serde_json::to_string(&built).expect("serialize"),
+        "{literal}: the stored fields must match the setter path"
+      );
+    }
+  }
+
+  /// Every field the serializer omits has to be optional on the way back
+  /// in. `end_threshold` and `max_run_duration` are both
+  /// `skip_serializing_if = "Option::is_none"` and both carry a
+  /// `deserialize_with` (the threshold sanitizer and
+  /// `humantime_serde::option`), which suppresses serde's implicit
+  /// "a missing `Option` field is `None`" rule — so without an explicit
+  /// `default` the DEFAULT options value does not survive its own
+  /// round-trip.
+  ///
+  /// Mutation: drop either `default` -> `missing field` on deserialize.
+  /// Red.
+  #[test]
+  fn default_options_survive_their_own_round_trip() {
+    let defaults = RunOptions::default();
+    let json = serde_json::to_string(&defaults).expect("serialize");
+    assert!(!json.contains("end_threshold"), "{json}");
+    assert!(!json.contains("max_run_duration"), "{json}");
+
+    let restored: RunOptions = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(restored.max_run_duration(), None);
+    assert_eq!(restored.start_threshold(), defaults.start_threshold());
+    assert_eq!(restored.end_threshold(), defaults.end_threshold());
+    assert_eq!(restored.min_run_duration(), defaults.min_run_duration());
+    assert_eq!(restored.min_gap_duration(), defaults.min_gap_duration());
+    assert_eq!(restored.min_gap_at_max_run(), defaults.min_gap_at_max_run());
+    assert_eq!(restored.pad(), defaults.pad());
   }
 
   #[test]

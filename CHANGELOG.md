@@ -23,13 +23,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     segmentation rather than changing it. (`f32::clamp` returns `NaN` for a
     `NaN` input, so the mapping is explicit rather than a bare clamp.)
   - Infinities and finite out-of-range values are clamped: at or above `1.0`
-    to `1.0`, at or below `0.0` to `0.0`. Each already compared to the
-    thresholds the way its clamped form does, so no boundary moves.
-  - One behavioural exception, now a pinned contract: with an effective
-    threshold of exactly `0.0`, `0.0 >= 0.0` holds where `NaN >= 0.0` did not,
-    so a `NaN` frame opens (zero start threshold) or sustains (zero end
-    threshold) a run it previously did not. Every configuration with positive
-    thresholds — including all defaults — segments identically.
+    to `1.0`, at or below `0.0` to `0.0`.
+  - One behavioural exception, now a pinned contract — and it is **not** about
+    `NaN`. It covers every input whose canonical value is `0.0`: `NaN`,
+    `f32::NEG_INFINITY`, and any finite negative alike. All of them are now
+    compared as `0.0`, and `0.0 >= 0.0` holds where the raw comparison did
+    not, so against a threshold of exactly `0.0` such a frame opens a run
+    (zero `start_threshold` — including the continuation run a
+    `max_run_duration` force-split decides on from the same comparison) or
+    sustains one (zero effective `end_threshold`) where it previously did
+    neither. Above-range inputs have no matching exception: `1.0` and
+    everything above it compare identically against any threshold in
+    `[0, 1]`. Every configuration with positive thresholds — including all
+    defaults — segments identically.
+- **serde:** `RunOptions` / `SpeechOptions` deserialization no longer bypasses
+  threshold sanitization. `set_start_threshold` / `set_end_threshold` sanitize
+  into `[0, 1]`, but the derived `Deserialize` wrote fields directly, so a
+  persisted profile carrying a negative or non-finite threshold installed a
+  value no setter would have stored — `start_threshold` was then read back
+  raw, and a raw `end_threshold` re-serialized as garbage (or as `null`, for a
+  non-finite value JSON cannot represent). Both fields now run the same
+  `sanitize_probability` on the way in, so the setter path and the serde path
+  store the same value for the same input.
+- **serde:** a default-constructed `RunOptions` now survives its own
+  round-trip. `max_run_duration` is `skip_serializing_if = "Option::is_none"`
+  and carries a `deserialize_with` (through `humantime_serde::option`), which
+  suppresses serde's implicit "a missing `Option` field is `None`" rule — so
+  serializing any options value with no `max_run_duration` (the default)
+  produced JSON that failed to deserialize with ``missing field
+  `max_run_duration` ``. Both `Option` fields now carry an explicit
+  `#[serde(default)]`.
 
 ## [0.2.0]
 

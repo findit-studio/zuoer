@@ -210,9 +210,9 @@ impl Aggregate {
 ///
 /// `NaN` is mapped to `0.0` rather than clamped: `f32::clamp` returns
 /// `NaN` for a `NaN` input, so a bare clamp would let it straight through.
-/// See [`RunSegmenter::push_probability`] for the policy this implements
-/// and why `0.0` is the mapping that preserves the pre-aggregate
-/// behaviour.
+/// See [`RunSegmenter::push_probability`] for the policy this implements,
+/// why `0.0` is the mapping that preserves the pre-aggregate behaviour,
+/// and the single threshold configuration where it does not.
 #[cfg_attr(not(tarpaulin), inline(always))]
 const fn normalize_probability(probability: f32) -> f32 {
   if probability.is_nan() {
@@ -457,19 +457,37 @@ impl RunSegmenter {
   /// run's aggregates, so the state machine and the aggregate can never
   /// disagree about a frame:
   ///
-  /// - `NaN` becomes `0.0` — silence. Every comparison against `NaN` is
-  ///   false, so a `NaN` frame already behaved as below-threshold; `0.0`
-  ///   keeps that segmentation instead of letting the frame escape into
+  /// - `NaN` becomes `0.0` — silence. `f32::clamp` returns `NaN` for a
+  ///   `NaN` input, so this mapping is explicit rather than a bare clamp.
+  ///   Every comparison against `NaN` is false, so such a frame already
+  ///   behaved as below-threshold; `0.0` keeps that segmentation instead
+  ///   of letting the frame escape into
   ///   [`mean_probability`](Run::mean_probability) as a `NaN` a consumer
-  ///   would read. The sole configuration where the two differ is a
-  ///   threshold of exactly `0.0`, which `0.0` satisfies (`0.0 >= 0.0`)
-  ///   and `NaN` did not: there, a `NaN` frame now opens or sustains a
-  ///   run.
+  ///   would read.
   /// - everything else is clamped into range: `f32::INFINITY` and any
   ///   value above `1.0` become `1.0`; `f32::NEG_INFINITY` and any value
-  ///   below `0.0` become `0.0`. Each of those already compared to the
-  ///   thresholds the way its clamped form does, so clamping moves no
-  ///   boundary at all.
+  ///   below `0.0` become `0.0`.
+  ///
+  /// ## The one exception: an effective threshold of exactly `0.0`
+  ///
+  /// Canonicalization moves no boundary in any configuration whose
+  /// effective thresholds are above zero — which is every default one.
+  /// The exception is not about `NaN`. It covers **every input whose
+  /// canonical value is `0.0`**: `NaN`, `f32::NEG_INFINITY`, and any
+  /// finite negative alike. All of them are now compared as `0.0`, and
+  /// `0.0 >= 0.0` holds where the raw comparison did not, so against a
+  /// threshold of exactly `0.0` such a frame
+  ///
+  /// - OPENS a run, when [`RunOptions::start_threshold`] is `0.0` — and
+  ///   likewise opens the continuation run that a
+  ///   [`RunOptions::max_run_duration`] force-split decides on from the
+  ///   same comparison;
+  /// - SUSTAINS a run, when the effective
+  ///   [`RunOptions::end_threshold`] is `0.0`.
+  ///
+  /// Above-range inputs have no matching exception: `1.0` and every value
+  /// above it — `f32::INFINITY` included — compare identically against
+  /// any threshold in `[0, 1]`.
   ///
   /// The repair keeps a malformed frame from corrupting a value a
   /// consumer reads; it is not a licence to emit out-of-range
@@ -1340,5 +1358,86 @@ mod tests {
     assert_all_in_range(&runs, "zero end threshold");
     assert_eq!(runs[0].end_sample(), 3 * HOP);
     assert_close(runs[0].mean_probability(), 0.4, "mean");
+  }
+  /// The exception above is not about `NaN`. **Every** input that
+  /// canonicalizes to `0.0` — `NaN`, `f32::NEG_INFINITY`, and any finite
+  /// negative — behaves as `0.0` against the thresholds, so all three open
+  /// a run at a zero start threshold and sustain one at a zero end
+  /// threshold where the raw comparison did not. Pinned as a class so the
+  /// contract cannot be read as narrower than it is.
+  ///
+  /// Mutation (canonicalize only `NaN` — the narrow reading): `-inf` and
+  /// `-1.0` stop opening at a zero start threshold, so the run begins one
+  /// frame late, and stop sustaining at a zero end threshold, so the
+  /// stream yields two runs instead of one. Red.
+  #[test]
+  fn every_input_canonicalizing_to_zero_shares_the_exception() {
+    for (invalid, name) in LOW_INVALID {
+      let options = open_options()
+        .with_start_threshold(0.0)
+        .with_min_gap_duration(Duration::ZERO);
+      let mut segmenter = RunSegmenter::new(options);
+
+      let runs = collect(&mut segmenter, &[invalid, 0.0]);
+
+      assert_eq!(runs.len(), 1, "{name}: a zero start threshold opens");
+      assert_all_in_range(&runs, name);
+      assert_eq!(runs[0].start_sample(), 0, "{name}");
+      assert_eq!(runs[0].end_sample(), HOP, "{name}");
+
+      let options = open_options()
+        .with_end_threshold(0.0)
+        .with_min_gap_duration(Duration::ZERO);
+      let mut segmenter = RunSegmenter::new(options);
+
+      let runs = collect(&mut segmenter, &[0.6, invalid, 0.6]);
+
+      assert_eq!(runs.len(), 1, "{name}: a zero end threshold sustains");
+      assert_all_in_range(&runs, name);
+      assert_eq!(runs[0].end_sample(), 3 * HOP, "{name}");
+      assert_close(runs[0].mean_probability(), 0.4, &format!("{name} mean"));
+    }
+  }
+
+  /// The same widened exception on the force-split continuation decision.
+  /// `split_at_max_duration` re-reads the current frame's probability to
+  /// decide whether the continuation opens at that frame; at a zero start
+  /// threshold every input canonicalizing to `0.0` satisfies it, so the
+  /// continuation starts one frame EARLIER than the raw comparison would
+  /// have started it.
+  ///
+  /// Mutation (canonicalize only `NaN`): `-inf` and `-1.0` fail
+  /// `probability >= 0.0`, so the continuation opens at the next
+  /// above-threshold frame instead — `6 * HOP` rather than `5 * HOP` —
+  /// and its mean loses the canonicalized frame, becoming `0.6`. Red.
+  #[test]
+  fn the_exception_reaches_the_force_split_continuation() {
+    for (invalid, name) in LOW_INVALID {
+      let options = open_options()
+        .with_start_threshold(0.0)
+        .with_max_run_duration(Duration::from_millis(160));
+      let mut segmenter = RunSegmenter::new(options);
+
+      let mut probabilities = vec![0.6; 5];
+      probabilities.push(invalid);
+      probabilities.extend([0.6; 3]);
+
+      let runs = collect(&mut segmenter, &probabilities);
+
+      assert_eq!(runs.len(), 2, "{name}");
+      assert_all_in_range(&runs, name);
+      assert_eq!(runs[0].end_sample(), 5 * HOP, "{name}");
+      assert_eq!(
+        runs[1].start_sample(),
+        5 * HOP,
+        "{name}: the continuation opens ON the canonicalized frame"
+      );
+      assert_eq!(runs[1].end_sample(), 9 * HOP, "{name}");
+      assert_close(
+        runs[1].mean_probability(),
+        0.45,
+        &format!("{name} continuation mean"),
+      );
+    }
   }
 }
