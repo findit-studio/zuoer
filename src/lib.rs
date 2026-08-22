@@ -1,7 +1,10 @@
-//! Backend-agnostic voice-activity-detection (VAD) core, over a
-//! domain-neutral run segmenter.
+//! Domain-neutral run segmenter — any frame-probability sequence to
+//! contiguous runs — with a backend-agnostic voice-activity-detection (VAD)
+//! shell over it.
 //!
-//! `zuoer` is the model-free heart of a VAD pipeline. Two layers:
+//! The segmenter at `zuoer`'s centre is domain-neutral; VAD is the first and
+//! best-validated shell over it, and sound-event detection the second.
+//! `zuoer` is the model-free half of either pipeline. Two layers:
 //!
 //! - a **neutral core** — [`RunSegmenter`], the hysteresis state machine
 //!   that turns any frame-probability sequence into contiguous [`Run`]s,
