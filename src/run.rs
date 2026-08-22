@@ -551,8 +551,10 @@ impl RunSegmenter {
     // the comparator fires one frame early — a 4-frame (128 ms) silence
     // dip would close a segment at default `min_silence_duration_ms =
     // 100`, where Python tolerates it and closes after 5 consecutive
-    // low-probability frames. See the parity harness in `tests/parity/`
-    // and the v0.3.0 CHANGELOG entry.
+    // low-probability frames. Both sides of that boundary are pinned by
+    // the `four_frame_silence_dip_does_not_close_segment_at_default_min_silence`
+    // and `five_frame_silence_dip_closes_segment_at_default_min_silence`
+    // tests in `detector`.
     //
     // `get_or_insert` runs BEFORE `observe` so the frame at `gap_start`
     // lands in the tentative aggregate: `gap_start` is the run's `raw_end`
