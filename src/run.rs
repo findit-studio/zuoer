@@ -457,7 +457,7 @@ impl RunSegmenter {
   /// run's aggregates, so the state machine and the aggregate can never
   /// disagree about a frame:
   ///
-  /// - `NaN` becomes `0.0` — silence. `f32::clamp` returns `NaN` for a
+  /// - `NaN` becomes `0.0` — inactive. `f32::clamp` returns `NaN` for a
   ///   `NaN` input, so this mapping is explicit rather than a bare clamp.
   ///   Every comparison against `NaN` is false, so such a frame already
   ///   behaved as below-threshold; `0.0` keeps that segmentation instead

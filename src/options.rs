@@ -5,7 +5,7 @@ use crate::error::{Error, Result};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-/// Sample rates directly supported by this VAD core (8 kHz and 16 kHz).
+/// Sample rates this crate supports directly (8 kHz and 16 kHz).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -45,7 +45,7 @@ impl SampleRate {
     }
   }
 
-  /// Create a `SampleRate` from a raw Hz value, returning an error if the rate is not supported by the model.
+  /// Create a `SampleRate` from a raw Hz value, returning an error if the rate is not supported.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn from_hz(rate: u32) -> Result<Self> {
     match rate {

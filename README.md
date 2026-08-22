@@ -39,7 +39,7 @@ over its raw model-frame span — padding excluded, bridged frames included,
 restarted at a force-split. That is the single source for VAD segment
 confidence and sound-event confidence alike. Both are always finite and inside
 `[0, 1]`: `push_probability` canonicalizes each frame first — `NaN` to `0.0`
-(silence), everything else clamped — and the same canonical value drives the
+(inactive), everything else clamped — and the same canonical value drives the
 hysteresis comparisons and the aggregates, so a malformed frame can never
 reach a consumer as a `NaN` confidence.
 

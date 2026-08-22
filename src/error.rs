@@ -1,4 +1,4 @@
-/// Errors that can occur during VAD operations.
+/// Errors that can occur in this crate and in the backends it drives.
 ///
 /// Marked `#[non_exhaustive]` because the set of variants grows as new
 /// backends bridge their errors through [`Error::Backend`], and consumer
@@ -41,7 +41,7 @@ pub enum Error {
   },
 
   /// Errors related to invalid chunk lengths that do not match the expected chunk size for the sample rate.
-  #[error("invalid VAD chunk length: expected {expected} samples, got {actual}")]
+  #[error("invalid chunk length: expected {expected} samples, got {actual}")]
   InvalidChunkLength {
     /// The expected chunk length in samples for the given sample rate.
     expected: usize,
@@ -50,5 +50,5 @@ pub enum Error {
   },
 }
 
-/// A convenient alias for results returned by VAD operations, using the custom `Error` type defined above.
+/// A convenient alias for results that carry this crate's [`Error`] type.
 pub type Result<T> = std::result::Result<T, Error>;
