@@ -3,7 +3,8 @@
 </div>
 <div align="center">
 
-Backend-agnostic voice-activity-detection (VAD) core.
+Domain-neutral run segmenter — frame probabilities to contiguous runs — with
+a backend-agnostic voice-activity-detection (VAD) shell over it.
 
 [<img alt="github" src="https://img.shields.io/badge/github-findit--studio/zuoer-8da0cb?style=for-the-badge&logo=Github" height="22">][Github-url]
 [<img alt="Build" src="https://img.shields.io/github/actions/workflow/status/findit-studio/zuoer/ci.yml?logo=Github-Actions&style=for-the-badge" height="22">][CI-url]
@@ -15,8 +16,11 @@ Backend-agnostic voice-activity-detection (VAD) core.
 
 ## Introduction
 
-`zuoer` is the model-free heart of a VAD pipeline, built on a domain-neutral
-core. It provides:
+`zuoer` turns any sequence of frame probabilities into contiguous runs. The
+segmenter at its centre is domain-neutral; voice activity detection is the
+first and best-validated shell over it — the model-free half of a VAD
+pipeline, carrying the Silero-derived segmentation semantics — and sound-event
+detection is the second. It provides:
 
 - the **neutral run segmenter** — `RunSegmenter`, the hysteresis state machine
   that turns any frame-probability sequence into contiguous `Run`s, configured
@@ -35,7 +39,7 @@ over its raw model-frame span — padding excluded, bridged frames included,
 restarted at a force-split. That is the single source for VAD segment
 confidence and sound-event confidence alike. Both are always finite and inside
 `[0, 1]`: `push_probability` canonicalizes each frame first — `NaN` to `0.0`
-(silence), everything else clamped — and the same canonical value drives the
+(inactive), everything else clamped — and the same canonical value drives the
 hysteresis comparisons and the aggregates, so a malformed frame can never
 reach a consumer as a `NaN` confidence.
 

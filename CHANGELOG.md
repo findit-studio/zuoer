@@ -57,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   speech-flavoured options accessors (`min_speech_duration`, `speech_pad`, the
   `*_samples` getters, and their `with_*` / `set_*` pairs) are kept as
   forwarding accessors. Source-compatible: no consumer needs an edit.
+- `Error::InvalidChunkLength`'s message drops the `VAD` qualifier: `invalid
+  chunk length: expected N samples, got M`. The variant is never constructed by
+  this crate — it exists for backends to raise, including the non-speech ones
+  the neutral core now serves.
 
 ### Fixed
 
