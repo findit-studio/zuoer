@@ -1,4 +1,5 @@
 use core::time::Duration;
+use std::fmt;
 
 use crate::error::{Error, Result};
 
@@ -56,6 +57,19 @@ impl SampleRate {
       16_000 => Ok(Self::Rate16k),
       other => Err(Error::UnsupportedSampleRate { rate: other }),
     }
+  }
+}
+
+/// The same word this sample rate's `serde` face uses (`"8k"` / `"16k"`).
+///
+/// This spelling is persisted by downstream derivation fingerprints —
+/// change it only with a breaking bump.
+impl fmt::Display for SampleRate {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(match self {
+      Self::Rate8k => "8k",
+      Self::Rate16k => "16k",
+    })
   }
 }
 
@@ -721,6 +735,50 @@ impl RunOptions {
   }
 }
 
+/// A canonical, one-line rendering of every field: `key=value` pairs in
+/// declaration order, joined by `,`. `Duration` fields are spelled the
+/// way `humantime` renders them (`pad=2s`), and `sample_rate` delegates
+/// to [`SampleRate`]'s own `Display` (`sample_rate=8k`). `end_threshold`
+/// and `max_run_duration` are only `Some` sometimes; when `None` the key
+/// is omitted entirely rather than printed as a placeholder — the same
+/// omission the `serde` face's `skip_serializing_if` applies to both
+/// fields.
+///
+/// This spelling is persisted by downstream derivation fingerprints —
+/// change it only with a breaking bump.
+impl fmt::Display for RunOptions {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "sample_rate={}", self.sample_rate)?;
+    write!(f, ",start_threshold={}", self.start_threshold)?;
+    if let Some(end_threshold) = self.end_threshold {
+      write!(f, ",end_threshold={end_threshold}")?;
+    }
+    write!(
+      f,
+      ",min_run_duration={}",
+      humantime::format_duration(self.min_run_duration)
+    )?;
+    write!(
+      f,
+      ",min_gap_duration={}",
+      humantime::format_duration(self.min_gap_duration)
+    )?;
+    write!(
+      f,
+      ",min_gap_at_max_run={}",
+      humantime::format_duration(self.min_gap_at_max_run)
+    )?;
+    if let Some(max_run_duration) = self.max_run_duration {
+      write!(
+        f,
+        ",max_run_duration={}",
+        humantime::format_duration(max_run_duration)
+      )?;
+    }
+    write!(f, ",pad={}", humantime::format_duration(self.pad))
+  }
+}
+
 #[inline]
 pub(crate) const fn ms_to_samples(duration: Duration, sample_rate: SampleRate) -> u64 {
   let samples = (duration.as_millis() * (sample_rate.hz() as u128)) / 1_000;
@@ -973,6 +1031,66 @@ mod tests {
         );
       }
     }
+  }
+
+  /// `SampleRate::to_string()` is the same word its `serde` face uses.
+  /// This is the spelling `RunOptions`'s own `Display` embeds for its
+  /// `sample_rate` key, and downstream derivation fingerprints persist
+  /// it verbatim.
+  ///
+  /// Mutation: spell a variant differently (`"8000hz"`, `"Rate8k"`, a
+  /// swapped pairing, ...) -> red.
+  #[test]
+  fn sample_rate_display_matches_its_serde_word() {
+    assert_eq!(SampleRate::Rate8k.to_string(), "8k");
+    assert_eq!(SampleRate::Rate16k.to_string(), "16k");
+  }
+
+  /// Every field, explicitly set — the same values as the full JSON/TOML
+  /// round-trip fixtures — pins the exact `Display` string: `key=value`
+  /// in declaration order, joined by `,`, durations spelled the way
+  /// `humantime` renders them, `sample_rate` delegating to
+  /// [`SampleRate`]'s own `Display`.
+  ///
+  /// Mutation: reorder two fields, change the separator, or format a
+  /// duration by hand instead of via `humantime` -> red.
+  #[test]
+  fn display_pins_every_field_verbatim() {
+    let options = RunOptions::default()
+      .with_sample_rate(SampleRate::Rate8k)
+      .with_start_threshold(0.7)
+      .with_end_threshold(0.2)
+      .with_min_run_duration(Duration::from_millis(300))
+      .with_min_gap_duration(Duration::from_millis(150))
+      .with_min_gap_at_max_run(Duration::from_millis(90))
+      .with_max_run_duration(Duration::from_secs(2))
+      .with_pad(Duration::from_millis(40));
+
+    assert_eq!(
+      options.to_string(),
+      "sample_rate=8k,start_threshold=0.7,end_threshold=0.2,min_run_duration=300ms,min_gap_duration=150ms,min_gap_at_max_run=90ms,max_run_duration=2s,pad=40ms"
+    );
+  }
+
+  /// A partial/default document — only `sample_rate` and `pad` set away
+  /// from `RunOptions::default()`, the same two fields the partial
+  /// JSON/TOML fixtures use — omits `end_threshold` and
+  /// `max_run_duration` entirely rather than printing a placeholder for
+  /// their `None` state, matching the `serde` face's own
+  /// `skip_serializing_if` omission for both fields.
+  ///
+  /// Mutation: print `None` as `end_threshold=` or `max_run_duration=`,
+  /// or drop the omission so both keys always appear -> red.
+  #[test]
+  fn display_pins_the_partial_default_document_verbatim() {
+    let options = RunOptions::default()
+      .with_sample_rate(SampleRate::Rate8k)
+      .with_pad(Duration::from_secs(2));
+
+    assert_eq!(
+      options.to_string(),
+      "sample_rate=8k,start_threshold=0.5,min_run_duration=250ms,min_gap_duration=100ms,min_gap_at_max_run=98ms,pad=2s"
+    );
   }
 }
 
