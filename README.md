@@ -171,7 +171,9 @@ assert!(dog_bark.finish().is_none());
 - `serde` — derive `Serialize`/`Deserialize` for `RunOptions` and `SampleRate`
   (`Duration` fields via `humantime-serde`). Fields serialize under their
   neutral names and also accept the 0.1 speech-flavoured names as
-  deserialization aliases.
+  deserialization aliases. Both types carry `deny_unknown_fields`, so a
+  misspelled key in a JSON/YAML/TOML profile is refused rather than
+  silently ignored.
 
 ## Consumers
 

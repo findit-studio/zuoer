@@ -78,7 +78,9 @@
 //! # Feature flags
 //!
 //! - `serde` — derive `Serialize`/`Deserialize` for [`RunOptions`] and
-//!   [`SampleRate`] (`Duration` fields via `humantime-serde`).
+//!   [`SampleRate`] (`Duration` fields via `humantime-serde`), with
+//!   `deny_unknown_fields` so a misspelled key in a JSON/YAML/TOML profile
+//!   is refused rather than silently ignored.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 #![deny(missing_docs)]
