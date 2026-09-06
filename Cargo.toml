@@ -22,10 +22,12 @@ include = [
 
 [features]
 default = []
-# Derive `Serialize`/`Deserialize` for the public `SpeechOptions` /
-# `SampleRate` configuration types so callers can persist VAD configuration
-# (e.g. JSON/TOML profiles). `Duration` fields go through `humantime-serde`
-# ("250ms" / "1.5s" rather than raw nanos). Off by default.
+# Derive `Serialize`/`Deserialize` for the public `RunOptions` (aka
+# `SpeechOptions`) / `SampleRate` configuration types so callers can persist
+# VAD or sound-event configuration (e.g. JSON/YAML/TOML profiles).
+# `Duration` fields go through `humantime-serde` ("250ms" / "1.5s" rather
+# than raw nanos), and both types carry `deny_unknown_fields`. Off by
+# default.
 serde = ["dep:serde", "dep:humantime-serde"]
 
 [dependencies]
@@ -36,6 +38,7 @@ humantime-serde = { version = "1", optional = true }
 
 [dev-dependencies]
 serde_json = "1"
+toml = "1"
 
 [package.metadata.docs.rs]
 all-features = true

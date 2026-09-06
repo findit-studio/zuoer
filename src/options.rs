@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 /// Sample rates this crate supports directly (8 kHz and 16 kHz).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[cfg_attr(
+  feature = "serde",
+  serde(rename_all = "snake_case", deny_unknown_fields)
+)]
 pub enum SampleRate {
   /// 8 kHz sample rate, which uses smaller chunks and less context.
   #[cfg_attr(feature = "serde", serde(rename = "8k"))]
@@ -106,8 +109,14 @@ const fn default_pad() -> Duration {
 /// clamp them, so a hand-edited profile cannot install a threshold no
 /// setter would have stored. Every field the serializer omits is optional
 /// on the way back in, so a serialized `RunOptions` always round-trips.
+///
+/// Unknown keys are refused (`deny_unknown_fields`) rather than silently
+/// ignored, by name — a misspelled key in a hand-edited profile (e.g. a
+/// `pad` typo'd as `pda`) is a configuration error, not a value this type
+/// should resolve to a default.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct RunOptions {
   #[cfg_attr(feature = "serde", serde(default))]
   sample_rate: SampleRate,
@@ -971,7 +980,7 @@ mod tests {
 mod serde_tests {
   use std::time::Duration;
 
-  use super::RunOptions;
+  use super::{RunOptions, SampleRate};
 
   #[test]
   fn options_round_trip_under_the_neutral_field_names() {
@@ -1129,5 +1138,151 @@ mod serde_tests {
         "{literal}: the stored fields must match the setter path"
       );
     }
+  }
+
+  /// A full profile — every field given explicitly, including
+  /// `sample_rate`, `start_threshold` and `end_threshold`, which the
+  /// default/partial round-trip tests never disturb — round-trips
+  /// exactly through JSON. `max_run_duration` carries the literal
+  /// humantime form the crate's docs advertise (`"2s"`).
+  #[test]
+  fn a_full_json_document_round_trips() {
+    let options = RunOptions::default()
+      .with_sample_rate(SampleRate::Rate8k)
+      .with_start_threshold(0.7)
+      .with_end_threshold(0.2)
+      .with_min_run_duration(Duration::from_millis(300))
+      .with_min_gap_duration(Duration::from_millis(150))
+      .with_min_gap_at_max_run(Duration::from_millis(90))
+      .with_max_run_duration(Duration::from_secs(2))
+      .with_pad(Duration::from_millis(40));
+
+    let json = serde_json::to_string(&options).expect("serialize");
+    assert!(json.contains(r#""sample_rate":"8k""#), "{json}");
+    assert!(json.contains(r#""max_run_duration":"2s""#), "{json}");
+
+    let restored: RunOptions = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(restored.sample_rate(), SampleRate::Rate8k);
+    assert_eq!(restored.start_threshold(), 0.7);
+    assert_eq!(restored.end_threshold(), 0.2);
+    assert_eq!(restored.min_run_duration(), Duration::from_millis(300));
+    assert_eq!(restored.min_gap_duration(), Duration::from_millis(150));
+    assert_eq!(restored.min_gap_at_max_run(), Duration::from_millis(90));
+    assert_eq!(restored.max_run_duration(), Some(Duration::from_secs(2)));
+    assert_eq!(restored.pad(), Duration::from_millis(40));
+  }
+
+  /// A partial profile — two of eight fields given, the rest left to
+  /// `#[serde(default)]` — round-trips through JSON: the given fields
+  /// take their document value and the rest match
+  /// `RunOptions::default()`, not zero or `None` by coincidence. The
+  /// given `pad` is the crate docs' own humantime example, `"2s"`.
+  #[test]
+  fn a_partial_json_document_fills_the_rest_from_defaults() {
+    let json = r#"{"sample_rate": "8k", "pad": "2s"}"#;
+
+    let restored: RunOptions = serde_json::from_str(json).expect("deserialize");
+    let defaults = RunOptions::default();
+
+    assert_eq!(restored.sample_rate(), SampleRate::Rate8k);
+    assert_eq!(restored.pad(), Duration::from_secs(2));
+    assert_eq!(restored.start_threshold(), defaults.start_threshold());
+    assert_eq!(restored.end_threshold(), defaults.end_threshold());
+    assert_eq!(restored.min_run_duration(), defaults.min_run_duration());
+    assert_eq!(restored.min_gap_duration(), defaults.min_gap_duration());
+    assert_eq!(restored.min_gap_at_max_run(), defaults.min_gap_at_max_run());
+    assert_eq!(restored.max_run_duration(), defaults.max_run_duration());
+  }
+
+  /// An unknown key is refused, by name, rather than silently ignored.
+  /// This is the gap the sound-events household's own options census
+  /// named against this crate (`this crate does not forward
+  /// zuoer/serde`, `no document face at all`): a typo'd key in a
+  /// hand-edited profile is a configuration error, not a value this
+  /// type should resolve to a default.
+  ///
+  /// Mutation: drop the container's `deny_unknown_fields` -> the typo'd
+  /// key is silently dropped instead of refused, and `expect_err` panics.
+  /// Red.
+  #[test]
+  fn an_unknown_field_is_refused_by_name() {
+    let json = r#"{"pda": "40ms"}"#;
+    let err = serde_json::from_str::<RunOptions>(json).expect_err("unknown field must be refused");
+    assert!(
+      err.to_string().contains("pda"),
+      "error should name the unknown field: {err}"
+    );
+  }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod toml_tests {
+  use std::time::Duration;
+
+  use super::{RunOptions, SampleRate};
+
+  /// The same full profile as the JSON round trip
+  /// ([`super::serde_tests::a_full_json_document_round_trips`]), this
+  /// time through TOML: the `serde` feature's document face is meant to
+  /// serve any consumer format built on `serde`, not JSON alone.
+  #[test]
+  fn a_full_toml_document_round_trips() {
+    let options = RunOptions::default()
+      .with_sample_rate(SampleRate::Rate8k)
+      .with_start_threshold(0.7)
+      .with_end_threshold(0.2)
+      .with_min_run_duration(Duration::from_millis(300))
+      .with_min_gap_duration(Duration::from_millis(150))
+      .with_min_gap_at_max_run(Duration::from_millis(90))
+      .with_max_run_duration(Duration::from_secs(2))
+      .with_pad(Duration::from_millis(40));
+
+    let document = toml::to_string(&options).expect("serialize");
+    assert!(document.contains("8k"), "{document}");
+    assert!(document.contains("2s"), "{document}");
+
+    let restored: RunOptions = toml::from_str(&document).expect("deserialize");
+    assert_eq!(restored.sample_rate(), SampleRate::Rate8k);
+    assert_eq!(restored.start_threshold(), 0.7);
+    assert_eq!(restored.end_threshold(), 0.2);
+    assert_eq!(restored.min_run_duration(), Duration::from_millis(300));
+    assert_eq!(restored.min_gap_duration(), Duration::from_millis(150));
+    assert_eq!(restored.min_gap_at_max_run(), Duration::from_millis(90));
+    assert_eq!(restored.max_run_duration(), Some(Duration::from_secs(2)));
+    assert_eq!(restored.pad(), Duration::from_millis(40));
+  }
+
+  /// A partial TOML document — two of eight keys given, hand-written the
+  /// way a deployment's config file would be — fills the rest from
+  /// `RunOptions::default()`, the same contract the JSON partial test
+  /// holds it to.
+  #[test]
+  fn a_partial_toml_document_fills_the_rest_from_defaults() {
+    let document = "sample_rate = \"8k\"\npad = \"2s\"\n";
+
+    let restored: RunOptions = toml::from_str(document).expect("deserialize");
+    let defaults = RunOptions::default();
+
+    assert_eq!(restored.sample_rate(), SampleRate::Rate8k);
+    assert_eq!(restored.pad(), Duration::from_secs(2));
+    assert_eq!(restored.start_threshold(), defaults.start_threshold());
+    assert_eq!(restored.end_threshold(), defaults.end_threshold());
+    assert_eq!(restored.min_run_duration(), defaults.min_run_duration());
+    assert_eq!(restored.min_gap_duration(), defaults.min_gap_duration());
+    assert_eq!(restored.min_gap_at_max_run(), defaults.min_gap_at_max_run());
+    assert_eq!(restored.max_run_duration(), defaults.max_run_duration());
+  }
+
+  /// `deny_unknown_fields` refuses by name under TOML too. The guarantee
+  /// is `serde`-level, not JSON-specific, but JSON and TOML report an
+  /// unknown field through different `Deserializer` impls, so this checks
+  /// the actual behaviour rather than assuming it carries over.
+  #[test]
+  fn an_unknown_field_is_refused_by_name_too() {
+    let err = toml::from_str::<RunOptions>("pda = \"40ms\"\n").expect_err("unknown field");
+    assert!(
+      err.to_string().contains("pda"),
+      "error should name the unknown field: {err}"
+    );
   }
 }

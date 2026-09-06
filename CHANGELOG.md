@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `deny_unknown_fields` on `RunOptions` and `SampleRate` under the `serde`
+  feature — a misspelled key in a hand-edited JSON/YAML/TOML profile is now
+  refused by name at deserialize time instead of being silently ignored.
+  This is the last gap in the two types' document faces: both already
+  derived `Serialize`/`Deserialize`, defaulted every field
+  (`RunOptions::default()` for the whole table, `SampleRate::default()` for
+  its own field) from one source shared with `RunOptions::new()`, carried
+  `Duration` fields through `humantime-serde` (`"2s"`, `"250ms"`), and
+  accepted the 0.1-era speech-flavoured field names as deserialization
+  aliases.
+- `toml` added as a dev-dependency to round-trip-test the document face
+  through TOML alongside the existing `serde_json` coverage (no new
+  run-time dependency; the crate stays serde-format-agnostic).
+
 ## [0.2.0] - 2026-08-22
 
 ### Added
