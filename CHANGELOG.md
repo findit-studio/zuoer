@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `impl Display for RunOptions` and `impl Display for SampleRate` — a
+  canonical, one-line spelling for both types: `key=value` pairs in
+  `RunOptions`'s declaration order joined by `,`, `Duration` fields rendered
+  the way `humantime` formats them (`pad=2s`), `sample_rate` delegating to
+  `SampleRate`'s own `Display` (`sample_rate=8k`, the same word its `serde`
+  face uses), and `end_threshold` / `max_run_duration` omitted entirely when
+  `None` rather than printed as a placeholder — the same omission the
+  `serde` face's `skip_serializing_if` already applies to both fields. This
+  spelling is persisted by downstream derivation fingerprints and every test
+  pins it verbatim; changing it is a breaking change. Unconditional (not
+  gated on the `serde` feature): pulls in `humantime` as a new mandatory
+  dependency, the same crate `humantime-serde` already carries in
+  transitively.
+
 ## [0.3.0] - 2026-09-06
 
 ### Added
