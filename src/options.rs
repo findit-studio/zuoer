@@ -128,7 +128,7 @@ const fn default_pad() -> Duration {
 /// ignored, by name — a misspelled key in a hand-edited profile (e.g. a
 /// `pad` typo'd as `pda`) is a configuration error, not a value this type
 /// should resolve to a default.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct RunOptions {
@@ -1091,6 +1091,29 @@ mod tests {
       options.to_string(),
       "sample_rate=8k,start_threshold=0.5,min_run_duration=250ms,min_gap_duration=100ms,min_gap_at_max_run=98ms,pad=2s"
     );
+  }
+
+  /// `RunOptions` derives `PartialEq` structurally: two defaults compare
+  /// equal, and changing a single knob of any field type it holds
+  /// (`f32` via `start_threshold`, `Duration` via `pad`) makes the two
+  /// values compare unequal. This is what lets a downstream type that
+  /// embeds `RunOptions` derive `PartialEq` itself instead of
+  /// hand-writing equality for a type it does not own.
+  ///
+  /// Mutation: drop `PartialEq` from the derive list -> does not
+  /// compile. Hand-write an `impl PartialEq` that skips a field -> the
+  /// corresponding "differs after one knob changes" assertion goes
+  /// green when it should stay red. A structural derive cannot make
+  /// that mistake.
+  #[test]
+  fn run_options_partial_eq_is_structural() {
+    assert_eq!(RunOptions::default(), RunOptions::default());
+
+    let different_threshold = RunOptions::default().with_start_threshold(0.9);
+    assert_ne!(RunOptions::default(), different_threshold);
+
+    let different_pad = RunOptions::default().with_pad(Duration::from_millis(999));
+    assert_ne!(RunOptions::default(), different_pad);
   }
 }
 
