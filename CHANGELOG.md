@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-12
+
+### Added
+
+- `PartialEq` derived for `RunOptions` — every field it holds
+  (`SampleRate`, `f32`, `Option<f32>`, `Duration`, `Option<Duration>`)
+  already implemented `PartialEq`, so this is a purely structural derive:
+  no manual `impl`, and float fields compare exactly the way `PartialEq`
+  compares them (no epsilon tolerance, `NaN != NaN`). Unblocks a
+  downstream type that embeds `RunOptions` in deriving `PartialEq` for
+  itself instead of hand-writing equality for a type it does not own.
+
 ## [0.3.1] - 2026-09-06
 
 ### Added
